@@ -18,16 +18,25 @@ enum UsageAPIError: LocalizedError {
             return "Decode error: \(error.localizedDescription)"
         }
     }
+
+    var isAuthError: Bool {
+        if case .invalidResponse(let code) = self { return (401...403).contains(code) }
+        return false
+    }
+
+    var isTransient: Bool {
+        switch self {
+        case .requestFailed: return true
+        case .invalidResponse(let code): return code >= 500
+        default: return false
+        }
+    }
 }
 
 enum UsageAPIService {
     private static let endpoint = URL(string: "https://api.anthropic.com/oauth/usage")!
 
-    static func fetch() async throws -> UsageResponse {
-        guard let token = KeychainService.getOAuthToken() else {
-            throw UsageAPIError.noToken
-        }
-
+    static func fetch(token: String) async throws -> UsageResponse {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "GET"
         request.timeoutInterval = 10

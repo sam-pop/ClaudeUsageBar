@@ -10,28 +10,38 @@ struct UsageSectionView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(title)
                     .font(.system(.subheadline, weight: .medium))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Text("\(percent)%")
-                    .font(.system(.title3, design: .rounded, weight: .semibold))
+                    .font(.system(.title3, design: .rounded, weight: .bold))
                     .monospacedDigit()
                     .foregroundStyle(color)
             }
 
             ProgressBarView(percent: percent, color: color)
 
-            HStack {
-                Text("Resets in")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                Text(UsageViewModel.resetCountdown(until: resetsAt))
-                    .font(.system(.caption, design: .monospaced, weight: .medium))
-                    .foregroundStyle(.secondary)
+            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                HStack(spacing: 4) {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                    Text("Resets in")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                    Text(UsageViewModel.liveCountdown(until: resetsAt))
+                        .font(.system(.caption, design: .monospaced, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
             }
         }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.primary.opacity(0.04))
+        )
     }
 }

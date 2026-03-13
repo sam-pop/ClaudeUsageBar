@@ -38,7 +38,12 @@ struct UsagePopoverView: View {
                 case .loaded(let snapshot):
                     usageSections(snapshot)
                 case .error(let message):
-                    errorView(message)
+                    if let s = viewModel.snapshot {
+                        usageSections(s)
+                        errorBanner(message)
+                    } else {
+                        errorView(message)
+                    }
                 }
             }
             .padding(.horizontal, 16)
@@ -51,13 +56,13 @@ struct UsagePopoverView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
         }
-        .frame(width: 280)
+        .frame(width: 300)
     }
 
     // MARK: - Subviews
 
     private func usageSections(_ snapshot: UsageSnapshot) -> some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 12) {
             UsageSectionView(
                 title: "5-Hour Window",
                 percent: snapshot.fiveHourPercent,
@@ -69,12 +74,43 @@ struct UsagePopoverView: View {
                 resetsAt: snapshot.sevenDayResetsAt
             )
 
+            // Sparkline
+            if viewModel.usageHistory.count >= 2 {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Label("5hr", systemImage: "circle.fill")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.blue)
+                        Label("7day", systemImage: "circle.fill")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.orange)
+                        Spacer()
+                        Text("Trend")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    SparklineView(dataPoints: viewModel.usageHistory)
+                }
+                .padding(10)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.primary.opacity(0.04))
+                )
+            }
+
             if let fetchedAt = viewModel.snapshot?.fetchedAt {
                 TimelineView(.periodic(from: .now, by: 30)) { _ in
-                    Text("Updated \(UsageViewModel.lastUpdatedText(since: fetchedAt))")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
+                    HStack(spacing: 4) {
+                        Text("Updated \(UsageViewModel.lastUpdatedText(since: fetchedAt))")
+                        if viewModel.isStaleData {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.yellow)
+                        }
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
                 }
             }
         }
@@ -89,6 +125,24 @@ struct UsagePopoverView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 20)
+    }
+
+    private func errorBanner(_ message: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 10))
+                .foregroundStyle(.orange)
+            Text(message)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.orange.opacity(0.08))
+        )
     }
 
     private func errorView(_ message: String) -> some View {

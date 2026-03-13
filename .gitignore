@@ -27,3 +27,6 @@ xcuserdata/
 *.app
 *.o
 *.swp
+
+## Logs
+firebase-debug.log
