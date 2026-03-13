@@ -23,7 +23,8 @@ final class UsageViewModel: ObservableObject {
     private var notifiedThresholds: Set<Int> = []
 
     private static let tokenCacheDuration: TimeInterval = 300
-    private static let maxHistoryPoints = 50
+    private static let maxHistoryPoints = 288      // 24 hours of data
+    private static let historySampleInterval: TimeInterval = 300 // record every 5 minutes
 
     init() {
         if let cached = UsageSnapshot.loadCached() {
@@ -187,6 +188,12 @@ final class UsageViewModel: ObservableObject {
     // MARK: - Usage History
 
     private func recordHistory(_ snapshot: UsageSnapshot) {
+        // Only sample every 5 minutes to build meaningful 24h history
+        if let last = usageHistory.last {
+            let elapsed = snapshot.fetchedAt.timeIntervalSince(last.timestamp)
+            if elapsed < Self.historySampleInterval { return }
+        }
+
         let point = UsageDataPoint(
             timestamp: snapshot.fetchedAt,
             fiveHourPercent: snapshot.fiveHourPercent,

@@ -74,7 +74,7 @@ struct UsagePopoverView: View {
                 resetsAt: snapshot.sevenDayResetsAt
             )
 
-            // Sparkline
+            // Sparkline (24h trend)
             if viewModel.usageHistory.count >= 2 {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
@@ -85,9 +85,9 @@ struct UsagePopoverView: View {
                             .font(.system(size: 9))
                             .foregroundStyle(.orange)
                         Spacer()
-                        Text("Trend")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
+                        Text("\(viewModel.usageHistory.count) samples")
+                            .font(.system(size: 8, design: .monospaced))
+                            .foregroundStyle(.quaternary)
                     }
                     SparklineView(dataPoints: viewModel.usageHistory)
                 }

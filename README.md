@@ -8,7 +8,7 @@ A lightweight macOS menu bar app that shows your Claude API usage limits at a gl
 
 ## What It Does
 
-ClaudeUsageBar sits in your menu bar showing your 5-hour window usage and reset countdown. Click to see full details — both usage windows, color-coded progress bars, live countdowns, and a trend sparkline.
+ClaudeUsageBar sits in your menu bar showing your 5-hour window usage and reset countdown. Click to see full details — both usage windows, color-coded progress bars, live countdowns, and a 24-hour usage trend sparkline.
 
 It reads the OAuth token from macOS Keychain (shared with Claude Code) and calls the Anthropic usage API directly — Claude Code doesn't need to be running.
 
@@ -81,7 +81,8 @@ Anthropic API ◀──── UsageAPIService (auto-retry) ────▶ Usage
 | **Notifications** | System alerts at 80% and 90% usage |
 | **Token caching** | 5-minute TTL to reduce Keychain reads |
 | **Auto-retry** | Retries transient errors; refreshes token on 401/403 |
-| **Persistence** | Last known data saved to UserDefaults |
+| **24h sparkline** | Samples every 5min, up to 288 points with time axis labels |
+| **Persistence** | Last known data + history saved to UserDefaults |
 | **Graceful errors** | Shows stale data + error banner instead of blank screen |
 
 ## Project Structure
@@ -102,7 +103,7 @@ ClaudeUsageBar/
     └── Views/
         ├── MenuBarLabel.swift     # Color-coded ✦ + percentage + countdown
         ├── ProgressBarView.swift  # Animated gradient bar with glow
-        ├── SparklineView.swift    # Mini trend graph
+        ├── SparklineView.swift    # 24h trend graph with time axis
         ├── UsageSectionView.swift # Card with bar + live countdown
         └── UsagePopoverView.swift # Full popover layout
 ```
