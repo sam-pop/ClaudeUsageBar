@@ -6,6 +6,12 @@ A lightweight macOS menu bar app that shows your Claude API usage limits at a gl
 ![Swift 6](https://img.shields.io/badge/Swift-6-orange)
 ![Zero Dependencies](https://img.shields.io/badge/dependencies-0-green)
 
+## Screenshots
+
+| Menu Bar | Popover |
+|----------|---------|
+| ![Menu Bar](screenshots/menubar.png) | ![Popover](screenshots/popover.png) |
+
 ## Overview
 
 ClaudeUsageBar lives in your menu bar and displays your current Claude 5-hour window usage as a percentage alongside the time remaining until reset. Click it to see a popover with detailed breakdowns of your 5-hour and 7-day usage windows, color-coded progress bars, live countdowns, and a usage trend sparkline.
@@ -14,13 +20,7 @@ It reads the OAuth token directly from the macOS Keychain (shared with Claude Co
 
 ### Menu Bar
 
-The menu bar shows a color-coded sparkle icon, your 5-hour window percentage, and the reset countdown:
-
-```
-✦ 42% · 2h 15m
-```
-
-The sparkle icon changes color based on your highest usage: green (< 50%), yellow (50–75%), red (> 75%).
+The menu bar shows a color-coded sparkle icon, your 5-hour window percentage, and the reset countdown. The sparkle icon changes color based on your highest usage: green (< 50%), yellow (50–75%), red (> 75%).
 
 ### Popover
 
@@ -64,7 +64,7 @@ Progress bars are color-coded:
 ### From Source
 
 ```bash
-git clone https://github.com/your-username/ClaudeUsageBar.git
+git clone https://github.com/sam-pop/ClaudeUsageBar.git
 cd ClaudeUsageBar
 make install
 ```
