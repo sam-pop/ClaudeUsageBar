@@ -160,34 +160,49 @@ struct UsagePopoverView: View {
     }
 
     private var footer: some View {
-        HStack {
-            Button {
-                Task { await viewModel.refresh() }
-            } label: {
-                Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 12, weight: .medium))
+        VStack(spacing: 8) {
+            HStack(spacing: 2) {
+                Text("Bar:")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Picker("", selection: $viewModel.menuBarDisplayMode) {
+                    ForEach(MenuBarDisplayMode.allCases, id: \.self) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .fixedSize()
+
+                Spacer()
+
+                Toggle("Login", isOn: Binding(
+                    get: { viewModel.launchAtLogin },
+                    set: { _ in viewModel.toggleLaunchAtLogin() }
+                ))
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .font(.caption2)
             }
-            .buttonStyle(.borderless)
-            .help("Refresh now")
 
-            Spacer()
+            HStack {
+                Button {
+                    Task { await viewModel.refresh() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 12, weight: .medium))
+                }
+                .buttonStyle(.borderless)
+                .help("Refresh now")
 
-            Toggle("Launch at Login", isOn: Binding(
-                get: { viewModel.launchAtLogin },
-                set: { _ in viewModel.toggleLaunchAtLogin() }
-            ))
-            .toggleStyle(.switch)
-            .controlSize(.mini)
-            .font(.caption)
+                Spacer()
 
-            Spacer()
-
-            Button("Quit") {
-                NSApplication.shared.terminate(nil)
+                Button("Quit") {
+                    NSApplication.shared.terminate(nil)
+                }
+                .buttonStyle(.borderless)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
             }
-            .buttonStyle(.borderless)
-            .font(.system(size: 12, weight: .medium))
-            .foregroundStyle(.secondary)
         }
     }
 }

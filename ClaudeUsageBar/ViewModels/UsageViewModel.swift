@@ -15,6 +15,9 @@ final class UsageViewModel: ObservableObject {
     @Published var state: LoadingState = .idle
     @Published var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled
     @Published var usageHistory: [UsageDataPoint] = []
+    @Published var menuBarDisplayMode: MenuBarDisplayMode {
+        didSet { UserDefaults.standard.set(menuBarDisplayMode.rawValue, forKey: "menuBarDisplayMode") }
+    }
 
     private var timer: Timer?
     private var lastSnapshot: UsageSnapshot?
@@ -27,6 +30,9 @@ final class UsageViewModel: ObservableObject {
     private static let historySampleInterval: TimeInterval = 300 // record every 5 minutes
 
     init() {
+        let raw = UserDefaults.standard.string(forKey: "menuBarDisplayMode") ?? "auto"
+        self.menuBarDisplayMode = MenuBarDisplayMode(rawValue: raw) ?? .auto
+
         if let cached = UsageSnapshot.loadCached() {
             lastSnapshot = cached
             state = .loaded(cached)
@@ -48,14 +54,40 @@ final class UsageViewModel: ObservableObject {
 
     var menuBarText: String {
         guard let s = snapshot else { return "--%" }
-        let countdown = Self.resetCountdown(until: s.fiveHourResetsAt)
+        let (percent, resetDate) = activeMenuBarValues(s)
+        let countdown = Self.resetCountdown(until: resetDate)
         let suffix = (countdown == "—" || countdown == "now") ? "" : " · \(countdown)"
-        return "\(s.fiveHourPercent)%\(suffix)"
+        return "\(percent)%\(suffix)"
     }
 
     var menuBarColor: Color {
         guard let s = snapshot else { return .primary }
-        return Self.color(for: s.higherPercent)
+        let (percent, _) = activeMenuBarValues(s)
+        return Self.color(for: percent)
+    }
+
+    var menuBarActiveWindow: MenuBarDisplayMode {
+        guard let s = snapshot else { return menuBarDisplayMode == .auto ? .fiveHour : menuBarDisplayMode }
+        switch menuBarDisplayMode {
+        case .fiveHour, .sevenDay: return menuBarDisplayMode
+        case .auto:
+            return s.fiveHourPercent >= s.sevenDayPercent ? .fiveHour : .sevenDay
+        }
+    }
+
+    private func activeMenuBarValues(_ s: UsageSnapshot) -> (percent: Int, resetDate: Date?) {
+        switch menuBarDisplayMode {
+        case .fiveHour:
+            return (s.fiveHourPercent, s.fiveHourResetsAt)
+        case .sevenDay:
+            return (s.sevenDayPercent, s.sevenDayResetsAt)
+        case .auto:
+            if s.fiveHourPercent >= s.sevenDayPercent {
+                return (s.fiveHourPercent, s.fiveHourResetsAt)
+            } else {
+                return (s.sevenDayPercent, s.sevenDayResetsAt)
+            }
+        }
     }
 
     var isStaleData: Bool {

@@ -68,6 +68,22 @@ struct UsageSnapshot: Codable {
     }
 }
 
+// MARK: - Menu bar display mode
+
+enum MenuBarDisplayMode: String, Codable, CaseIterable {
+    case auto = "auto"
+    case fiveHour = "5h"
+    case sevenDay = "7d"
+
+    var label: String {
+        switch self {
+        case .auto: return "Auto"
+        case .fiveHour: return "5h"
+        case .sevenDay: return "7d"
+        }
+    }
+}
+
 // MARK: - History data point
 
 struct UsageDataPoint: Codable {
