@@ -2,6 +2,7 @@ import Foundation
 
 enum UsageAPIError: LocalizedError {
     case noToken
+    case tokenExpired
     case requestFailed(Error)
     case invalidResponse(Int)
     case decodingFailed(Error)
@@ -9,7 +10,9 @@ enum UsageAPIError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .noToken:
-            return "No OAuth token found in Keychain"
+            return "No OAuth token found — open Claude Code, then click Refresh"
+        case .tokenExpired:
+            return "Token expired — click Refresh to re-read from Claude Code"
         case .requestFailed(let error):
             return "Request failed: \(error.localizedDescription)"
         case .invalidResponse(let code):
@@ -22,6 +25,13 @@ enum UsageAPIError: LocalizedError {
     var isAuthError: Bool {
         if case .invalidResponse(let code) = self { return (401...403).contains(code) }
         return false
+    }
+
+    var needsKeychainRefresh: Bool {
+        switch self {
+        case .noToken, .tokenExpired: return true
+        default: return false
+        }
     }
 
     var isTransient: Bool {

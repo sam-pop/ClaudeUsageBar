@@ -136,6 +136,10 @@ struct UsagePopoverView: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
+            Spacer(minLength: 4)
+            if viewModel.needsManualRefresh {
+                refreshTokenButton(compact: true)
+            }
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -146,7 +150,7 @@ struct UsagePopoverView: View {
     }
 
     private func errorView(_ message: String) -> some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 10) {
             Image(systemName: "exclamationmark.triangle")
                 .font(.title2)
                 .foregroundStyle(.orange)
@@ -154,9 +158,24 @@ struct UsagePopoverView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+            if viewModel.needsManualRefresh {
+                refreshTokenButton(compact: false)
+            }
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 12)
+    }
+
+    private func refreshTokenButton(compact: Bool) -> some View {
+        Button {
+            Task { await viewModel.refreshFromKeychain() }
+        } label: {
+            Label("Refresh token", systemImage: "key.fill")
+                .font(.system(size: compact ? 10 : 12, weight: .medium))
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(compact ? .mini : .small)
+        .help("Re-read OAuth token from Claude Code's keychain (may prompt for password)")
     }
 
     private var footer: some View {

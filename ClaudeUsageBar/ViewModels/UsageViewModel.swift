@@ -15,19 +15,20 @@ final class UsageViewModel: ObservableObject {
     @Published var state: LoadingState = .idle
     @Published var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled
     @Published var usageHistory: [UsageDataPoint] = []
+    @Published var needsManualRefresh: Bool = false
     @Published var menuBarDisplayMode: MenuBarDisplayMode {
         didSet { UserDefaults.standard.set(menuBarDisplayMode.rawValue, forKey: "menuBarDisplayMode") }
     }
 
     private var timer: Timer?
     private var lastSnapshot: UsageSnapshot?
-    private var cachedToken: String?
-    private var tokenFetchedAt: Date?
+    private var cachedCredentials: CachedCredentials?
     private var notifiedThresholds: Set<Int> = []
+    private var oauthRefreshFailures = 0
 
-    private static let tokenCacheDuration: TimeInterval = 300
     private static let maxHistoryPoints = 288      // 24 hours of data
     private static let historySampleInterval: TimeInterval = 300 // record every 5 minutes
+    private static let maxOAuthRefreshFailures = 3
 
     init() {
         let raw = UserDefaults.standard.string(forKey: "menuBarDisplayMode") ?? "auto"
@@ -122,53 +123,80 @@ final class UsageViewModel: ObservableObject {
             let snap = try await fetchWithRetry()
             lastSnapshot = snap
             state = .loaded(snap)
+            needsManualRefresh = false
             snap.persist()
             recordHistory(snap)
             checkThresholds(snap)
             scheduleTimer()
+        } catch let error as UsageAPIError {
+            state = .error(error.localizedDescription)
+            needsManualRefresh = error.needsKeychainRefresh
         } catch {
             state = .error(error.localizedDescription)
+            needsManualRefresh = false
         }
     }
 
     private func fetchWithRetry() async throws -> UsageSnapshot {
-        guard let token = getToken() else {
+        guard let creds = getCredentials() else {
             throw UsageAPIError.noToken
         }
 
         do {
-            let response = try await UsageAPIService.fetch(token: token)
+            let response = try await UsageAPIService.fetch(token: creds.accessToken)
             return UsageSnapshot(from: response)
         } catch let error as UsageAPIError where error.isAuthError {
-            invalidateToken()
-            guard let freshToken = getToken(forceRefresh: true) else {
-                throw UsageAPIError.noToken
+            // Try OAuth refresh-token flow first. On success we never touch the keychain.
+            if let refreshed = await tryOAuthRefresh(using: creds) {
+                cachedCredentials = refreshed
+                let response = try await UsageAPIService.fetch(token: refreshed.accessToken)
+                return UsageSnapshot(from: response)
             }
-            let response = try await UsageAPIService.fetch(token: freshToken)
-            return UsageSnapshot(from: response)
+            // Refresh failed (or no refresh token) — surface a user-actionable error
+            // instead of silently prompting from the keychain.
+            throw UsageAPIError.tokenExpired
         } catch let error as UsageAPIError where error.isTransient {
             try? await Task.sleep(for: .seconds(2))
-            let response = try await UsageAPIService.fetch(token: token)
+            let response = try await UsageAPIService.fetch(token: creds.accessToken)
             return UsageSnapshot(from: response)
         }
     }
 
-    // MARK: - Token Cache
+    // MARK: - Credentials
 
-    private func getToken(forceRefresh: Bool = false) -> String? {
-        if !forceRefresh, let token = cachedToken, let at = tokenFetchedAt,
-           Date().timeIntervalSince(at) < Self.tokenCacheDuration {
-            return token
+    private func getCredentials() -> CachedCredentials? {
+        if let creds = cachedCredentials {
+            return creds
         }
-        let token = KeychainService.getOAuthToken()
-        cachedToken = token
-        tokenFetchedAt = Date()
-        return token
+        let creds = KeychainService.getCredentials()
+        cachedCredentials = creds
+        return creds
     }
 
-    private func invalidateToken() {
-        cachedToken = nil
-        tokenFetchedAt = nil
+    /// User-triggered: re-reads from Claude Code's keychain. This is the only path
+    /// that may produce a macOS password prompt after first install.
+    func refreshFromKeychain() async {
+        cachedCredentials = nil
+        oauthRefreshFailures = 0
+        if let creds = KeychainService.refreshFromKeychain() {
+            cachedCredentials = creds
+        }
+        await refresh()
+    }
+
+    private func tryOAuthRefresh(using creds: CachedCredentials) async -> CachedCredentials? {
+        guard oauthRefreshFailures < Self.maxOAuthRefreshFailures,
+              let refreshToken = creds.refreshToken else {
+            return nil
+        }
+        do {
+            let refreshed = try await KeychainService.refreshAccessToken(using: refreshToken)
+            oauthRefreshFailures = 0
+            return refreshed
+        } catch {
+            oauthRefreshFailures += 1
+            return nil
+        }
     }
 
     // MARK: - Launch at Login
