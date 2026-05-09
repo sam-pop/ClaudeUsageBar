@@ -6,12 +6,19 @@ struct MenuBarLabel: View {
     let color: Color
     let displayMode: MenuBarDisplayMode
     let activeWindow: MenuBarDisplayMode
+    let needsRefresh: Bool
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(nsImage: modeBadge)
-            Text(text)
-                .monospacedDigit()
+            if needsRefresh {
+                Image(systemName: "key.slash.fill")
+                    .foregroundStyle(.red)
+                Text("Refresh")
+            } else {
+                Image(nsImage: modeBadge)
+                Text(text)
+                    .monospacedDigit()
+            }
         }
     }
 

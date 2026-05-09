@@ -8,7 +8,7 @@ struct ClaudeUsageBarApp: App {
         MenuBarExtra {
             UsagePopoverView(viewModel: viewModel)
         } label: {
-            MenuBarLabel(text: viewModel.menuBarText, color: viewModel.menuBarColor, displayMode: viewModel.menuBarDisplayMode, activeWindow: viewModel.menuBarActiveWindow)
+            MenuBarLabel(text: viewModel.menuBarText, color: viewModel.menuBarColor, displayMode: viewModel.menuBarDisplayMode, activeWindow: viewModel.menuBarActiveWindow, needsRefresh: viewModel.needsManualRefresh)
         }
         .menuBarExtraStyle(.window)
     }
