@@ -237,8 +237,15 @@ final class UsageViewModel: ObservableObject {
     private func requestNotificationAuthorization() async {
         let center = UNUserNotificationCenter.current()
         _ = try? await center.requestAuthorization(options: [.alert, .sound])
-        let settings = await center.notificationSettings()
-        notificationsAuthorized = settings.authorizationStatus == .authorized
+        notificationsAuthorized = await Self.isNotificationAuthorized()
+    }
+
+    /// `UNNotificationSettings` isn't `Sendable` in the macOS 15 SDK (Xcode 16), so it
+    /// can't cross into the MainActor context; read it nonisolated and pass back only
+    /// the `Bool`.
+    private nonisolated static func isNotificationAuthorized() async -> Bool {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        return settings.authorizationStatus == .authorized
     }
 
     private func checkThresholds(_ snapshot: UsageSnapshot) {
