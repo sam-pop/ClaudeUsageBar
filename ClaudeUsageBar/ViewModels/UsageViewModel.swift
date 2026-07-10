@@ -25,7 +25,7 @@ final class UsageViewModel: ObservableObject {
     private var timer: Timer?
     private var lastSnapshot: UsageSnapshot?
     private var cachedCredentials: CachedCredentials?
-    private var notifiedThresholds: Set<Int> = []
+    private var thresholdTracker: ThresholdTracker
     private var oauthRefreshFailures = 0
 
     private static let maxHistoryPoints = 288      // 24 hours of data
@@ -35,6 +35,11 @@ final class UsageViewModel: ObservableObject {
     init() {
         let raw = UserDefaults.standard.string(forKey: "menuBarDisplayMode") ?? "auto"
         self.menuBarDisplayMode = MenuBarDisplayMode(rawValue: raw) ?? .auto
+
+        let rawThresholds = UserDefaults.standard.array(forKey: "notificationThresholds")
+        self.thresholdTracker = ThresholdTracker(
+            thresholds: ThresholdTracker.sanitizedThresholds(from: rawThresholds)
+        )
 
         if let cached = UsageSnapshot.loadCached() {
             lastSnapshot = cached
@@ -104,7 +109,9 @@ final class UsageViewModel: ObservableObject {
     // MARK: - Refresh
 
     func refresh() async {
-        state = .loading
+        // Only show the loading state on a cold start; background polls keep the last
+        // snapshot visible so the header doesn't blink on every tick.
+        if snapshot == nil { state = .loading }
         do {
             let snap = try await fetchWithRetry()
             lastSnapshot = snap
@@ -235,28 +242,30 @@ final class UsageViewModel: ObservableObject {
     }
 
     private func checkThresholds(_ snapshot: UsageSnapshot) {
-        let percent = snapshot.higherPercent
-        for threshold in [80, 90] {
-            if percent >= threshold && !notifiedThresholds.contains(threshold) {
-                notifiedThresholds.insert(threshold)
-                sendNotification(percent: percent, threshold: threshold)
-            }
-        }
-        if percent < 80 {
-            notifiedThresholds.removeAll()
+        let crossings = thresholdTracker.record(
+            fiveHour: snapshot.fiveHourPercent,
+            sevenDay: snapshot.sevenDayPercent
+        )
+        for crossing in crossings {
+            sendNotification(for: crossing)
         }
     }
 
-    private nonisolated func sendNotification(percent: Int, threshold: Int) {
+    private nonisolated func sendNotification(for crossing: ThresholdTracker.Crossing) {
+        let (windowName, windowKey) = crossing.window == .fiveHour
+            ? ("5-hour", "fiveHour")
+            : ("7-day", "sevenDay")
+
         let content = UNMutableNotificationContent()
         content.title = "Claude Usage Warning"
-        content.body = threshold >= 90
-            ? "Usage at \(percent)% — approaching limit!"
-            : "Usage has reached \(percent)%"
+        content.body = crossing.threshold >= 90
+            ? "\(windowName) window at \(crossing.percent)% — approaching limit!"
+            : "\(windowName) window at \(crossing.percent)%"
         content.sound = .default
 
+        // Per-window identifier so a 5h notification never overwrites a 7d one.
         let request = UNNotificationRequest(
-            identifier: "usage-\(threshold)",
+            identifier: "usage-\(windowKey)-\(crossing.threshold)",
             content: content,
             trigger: nil
         )

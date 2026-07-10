@@ -53,7 +53,7 @@ enum UsageAPIService {
         request.setValue("application/json", forHTTPHeaderField: "accept")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "authorization")
-        request.setValue("ClaudeUsageBar/1.0", forHTTPHeaderField: "user-agent")
+        request.setValue(AppInfo.userAgent, forHTTPHeaderField: "user-agent")
 
         let data: Data
         let response: URLResponse

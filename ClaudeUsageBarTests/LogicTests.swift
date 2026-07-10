@@ -75,6 +75,26 @@ struct ThresholdTrackerTests {
         let rearmed = tracker.record(fiveHour: 88, sevenDay: 82)
         #expect(rearmed == [ThresholdTracker.Crossing(window: .fiveHour, threshold: 80, percent: 88)])
     }
+
+    @Test("sanitizedThresholds sorts, clamps, dedupes, drops junk, and falls back to default")
+    func sanitize() {
+        // Valid, already-sorted input passes through.
+        #expect(ThresholdTracker.sanitizedThresholds(from: [80, 90]) == [80, 90])
+
+        // nil and empty fall back to the default.
+        #expect(ThresholdTracker.sanitizedThresholds(from: nil) == [80, 90])
+        #expect(ThresholdTracker.sanitizedThresholds(from: []) == [80, 90])
+
+        // Unsorted input is sorted; duplicates removed.
+        #expect(ThresholdTracker.sanitizedThresholds(from: [90, 80, 80]) == [80, 90])
+
+        // Junk entries dropped, out-of-range values clamped into 1...100.
+        // "abc" -> dropped, 250 -> 100, 0 -> 1, plus 80 and 90.
+        #expect(ThresholdTracker.sanitizedThresholds(from: ["abc", 250, 0, 90, 80]) == [1, 80, 90, 100])
+
+        // Strings that parse as ints are accepted (defaults write stores numbers as strings).
+        #expect(ThresholdTracker.sanitizedThresholds(from: ["70", "95"]) == [70, 95])
+    }
 }
 
 // MARK: - HistoryBuffer

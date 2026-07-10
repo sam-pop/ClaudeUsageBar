@@ -26,6 +26,26 @@ struct ThresholdTracker {
         self.clearBelow = thresholds.min() ?? 0
     }
 
+    /// Parses a raw UserDefaults value (`notificationThresholds`) into a valid, sorted,
+    /// deduped threshold list clamped to 1...100. Non-numeric entries are dropped;
+    /// `nil` or an all-junk/empty result falls back to `defaults`.
+    ///
+    /// Takes `[Any]?` because `UserDefaults.array(forKey:)` returns bridged values and
+    /// `defaults write … -array 80 90` stores the numbers as strings.
+    static func sanitizedThresholds(from raw: [Any]?, default defaults: [Int] = [80, 90]) -> [Int] {
+        guard let raw else { return defaults }
+        let ints: [Int] = raw.compactMap { value in
+            switch value {
+            case let i as Int: return i
+            case let d as Double: return Int(d)
+            case let s as String: return Int(s)
+            default: return nil
+            }
+        }
+        let cleaned = Set(ints.map { min(100, max(1, $0)) }).sorted()
+        return cleaned.isEmpty ? defaults : cleaned
+    }
+
     /// Records the latest percentages for both windows and returns any thresholds newly
     /// crossed this call. A window that has dropped below the lowest threshold is re-armed.
     mutating func record(fiveHour: Int, sevenDay: Int) -> [Crossing] {

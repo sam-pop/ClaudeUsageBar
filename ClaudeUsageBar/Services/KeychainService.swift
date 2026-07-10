@@ -82,7 +82,7 @@ enum KeychainService {
         request.timeoutInterval = 10
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.setValue("application/json", forHTTPHeaderField: "accept")
-        request.setValue("ClaudeUsageBar/1.0", forHTTPHeaderField: "user-agent")
+        request.setValue(AppInfo.userAgent, forHTTPHeaderField: "user-agent")
 
         let body: [String: String] = [
             "grant_type": "refresh_token",
