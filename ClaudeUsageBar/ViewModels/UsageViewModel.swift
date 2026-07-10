@@ -14,6 +14,8 @@ final class UsageViewModel: ObservableObject {
 
     @Published var state: LoadingState = .idle
     @Published var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled
+    @Published var launchAtLoginError: String?
+    @Published var notificationsAuthorized: Bool?
     @Published var usageHistory: [UsageDataPoint] = []
     @Published var needsManualRefresh: Bool = false
     @Published var menuBarDisplayMode: MenuBarDisplayMode {
@@ -23,7 +25,7 @@ final class UsageViewModel: ObservableObject {
     private var timer: Timer?
     private var lastSnapshot: UsageSnapshot?
     private var cachedCredentials: CachedCredentials?
-    private var notifiedThresholds: Set<Int> = []
+    private var thresholdTracker: ThresholdTracker
     private var oauthRefreshFailures = 0
 
     private static let maxHistoryPoints = 288      // 24 hours of data
@@ -34,14 +36,20 @@ final class UsageViewModel: ObservableObject {
         let raw = UserDefaults.standard.string(forKey: "menuBarDisplayMode") ?? "auto"
         self.menuBarDisplayMode = MenuBarDisplayMode(rawValue: raw) ?? .auto
 
+        let rawThresholds = UserDefaults.standard.array(forKey: "notificationThresholds")
+        self.thresholdTracker = ThresholdTracker(
+            thresholds: ThresholdTracker.sanitizedThresholds(from: rawThresholds)
+        )
+
         if let cached = UsageSnapshot.loadCached() {
             lastSnapshot = cached
             state = .loaded(cached)
         }
         usageHistory = Self.loadHistory()
 
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
-
+        Task { [weak self] in
+            await self?.requestNotificationAuthorization()
+        }
         Task { [weak self] in
             await self?.refresh()
         }
@@ -54,41 +62,24 @@ final class UsageViewModel: ObservableObject {
     }
 
     var menuBarText: String {
-        guard let s = snapshot else { return "--%" }
-        let (percent, resetDate) = activeMenuBarValues(s)
-        let countdown = Self.resetCountdown(until: resetDate)
+        guard let active = MenuBarSelection.active(mode: menuBarDisplayMode, snapshot: snapshot) else {
+            return "--%"
+        }
+        let countdown = Self.resetCountdown(until: active.resetsAt)
         let suffix = (countdown == "—" || countdown == "now") ? "" : " · \(countdown)"
-        return "\(percent)%\(suffix)"
+        return "\(active.percent)%\(suffix)"
     }
 
     var menuBarColor: Color {
-        guard let s = snapshot else { return .primary }
-        let (percent, _) = activeMenuBarValues(s)
-        return Self.color(for: percent)
+        guard let active = MenuBarSelection.active(mode: menuBarDisplayMode, snapshot: snapshot) else {
+            return .primary
+        }
+        return Self.color(for: active.percent)
     }
 
     var menuBarActiveWindow: MenuBarDisplayMode {
-        guard let s = snapshot else { return menuBarDisplayMode == .auto ? .fiveHour : menuBarDisplayMode }
-        switch menuBarDisplayMode {
-        case .fiveHour, .sevenDay: return menuBarDisplayMode
-        case .auto:
-            return s.fiveHourPercent >= s.sevenDayPercent ? .fiveHour : .sevenDay
-        }
-    }
-
-    private func activeMenuBarValues(_ s: UsageSnapshot) -> (percent: Int, resetDate: Date?) {
-        switch menuBarDisplayMode {
-        case .fiveHour:
-            return (s.fiveHourPercent, s.fiveHourResetsAt)
-        case .sevenDay:
-            return (s.sevenDayPercent, s.sevenDayResetsAt)
-        case .auto:
-            if s.fiveHourPercent >= s.sevenDayPercent {
-                return (s.fiveHourPercent, s.fiveHourResetsAt)
-            } else {
-                return (s.sevenDayPercent, s.sevenDayResetsAt)
-            }
-        }
+        MenuBarSelection.active(mode: menuBarDisplayMode, snapshot: snapshot)?.window
+            ?? (menuBarDisplayMode == .auto ? .fiveHour : menuBarDisplayMode)
     }
 
     var isStaleData: Bool {
@@ -118,7 +109,9 @@ final class UsageViewModel: ObservableObject {
     // MARK: - Refresh
 
     func refresh() async {
-        state = .loading
+        // Only show the loading state on a cold start; background polls keep the last
+        // snapshot visible so the header doesn't blink on every tick.
+        if snapshot == nil { state = .loading }
         do {
             let snap = try await fetchWithRetry()
             lastSnapshot = snap
@@ -138,28 +131,48 @@ final class UsageViewModel: ObservableObject {
     }
 
     private func fetchWithRetry() async throws -> UsageSnapshot {
-        guard let creds = getCredentials() else {
+        guard var creds = getCredentials() else {
             throw UsageAPIError.noToken
         }
 
-        do {
-            let response = try await UsageAPIService.fetch(token: creds.accessToken)
-            return UsageSnapshot(from: response)
-        } catch let error as UsageAPIError where error.isAuthError {
-            // Try OAuth refresh-token flow first. On success we never touch the keychain.
-            if let refreshed = await tryOAuthRefresh(using: creds) {
-                cachedCredentials = refreshed
-                let response = try await UsageAPIService.fetch(token: refreshed.accessToken)
-                return UsageSnapshot(from: response)
-            }
-            // Refresh failed (or no refresh token) — surface a user-actionable error
-            // instead of silently prompting from the keychain.
-            throw UsageAPIError.tokenExpired
-        } catch let error as UsageAPIError where error.isTransient {
-            try? await Task.sleep(for: .seconds(2))
-            let response = try await UsageAPIService.fetch(token: creds.accessToken)
-            return UsageSnapshot(from: response)
+        // Proactive refresh: if the token is expiring soon, swap it out before the first
+        // call. On failure we proceed with the old token; the reactive 401/403 path below
+        // stays as the safety net.
+        if creds.needsRefresh(), let refreshed = await tryOAuthRefresh(using: creds) {
+            cachedCredentials = refreshed
+            creds = refreshed
         }
+
+        // Retry only transient errors, with exponential backoff. Auth errors bypass the
+        // loop and take the OAuth/keychain refresh path; other errors propagate as-is.
+        let policy = RetryPolicy()
+        var rng = SystemRandomNumberGenerator()
+        var lastError: UsageAPIError?
+
+        for attempt in 1...policy.maxAttempts {
+            do {
+                let response = try await UsageAPIService.fetch(token: creds.accessToken)
+                return UsageSnapshot(from: response)
+            } catch let error as UsageAPIError where error.isAuthError {
+                // Try OAuth refresh-token flow first. On success we never touch the keychain.
+                if let refreshed = await tryOAuthRefresh(using: creds) {
+                    cachedCredentials = refreshed
+                    let response = try await UsageAPIService.fetch(token: refreshed.accessToken)
+                    return UsageSnapshot(from: response)
+                }
+                // Refresh failed (or no refresh token) — surface a user-actionable error
+                // instead of silently prompting from the keychain.
+                throw UsageAPIError.tokenExpired
+            } catch let error as UsageAPIError where error.isTransient {
+                lastError = error
+                if attempt < policy.maxAttempts {
+                    let delay = policy.delay(forAttempt: attempt, using: &rng)
+                    try? await Task.sleep(for: .seconds(delay))
+                }
+            }
+        }
+        // Every attempt hit a transient failure — rethrow the last one.
+        throw lastError ?? UsageAPIError.invalidResponse(-1)
     }
 
     // MARK: - Credentials
@@ -209,36 +222,57 @@ final class UsageViewModel: ObservableObject {
                 try SMAppService.mainApp.register()
             }
             launchAtLogin = SMAppService.mainApp.status == .enabled
+            launchAtLoginError = nil
         } catch {
-            // Silently fail — user can retry
+            // Surface the failure and snap the toggle back to the real status.
+            launchAtLoginError = "Couldn't change launch-at-login: \(error.localizedDescription)"
+            launchAtLogin = SMAppService.mainApp.status == .enabled
         }
     }
 
     // MARK: - Notifications
 
+    /// Requests notification authorization, then re-reads the live settings so a
+    /// Settings-app revocation (which won't re-prompt) is still reflected in the UI.
+    private func requestNotificationAuthorization() async {
+        let center = UNUserNotificationCenter.current()
+        _ = try? await center.requestAuthorization(options: [.alert, .sound])
+        notificationsAuthorized = await Self.isNotificationAuthorized()
+    }
+
+    /// `UNNotificationSettings` isn't `Sendable` in the macOS 15 SDK (Xcode 16), so it
+    /// can't cross into the MainActor context; read it nonisolated and pass back only
+    /// the `Bool`.
+    private nonisolated static func isNotificationAuthorized() async -> Bool {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        return settings.authorizationStatus == .authorized
+    }
+
     private func checkThresholds(_ snapshot: UsageSnapshot) {
-        let percent = snapshot.higherPercent
-        for threshold in [80, 90] {
-            if percent >= threshold && !notifiedThresholds.contains(threshold) {
-                notifiedThresholds.insert(threshold)
-                sendNotification(percent: percent, threshold: threshold)
-            }
-        }
-        if percent < 80 {
-            notifiedThresholds.removeAll()
+        let crossings = thresholdTracker.record(
+            fiveHour: snapshot.fiveHourPercent,
+            sevenDay: snapshot.sevenDayPercent
+        )
+        for crossing in crossings {
+            sendNotification(for: crossing)
         }
     }
 
-    private nonisolated func sendNotification(percent: Int, threshold: Int) {
+    private nonisolated func sendNotification(for crossing: ThresholdTracker.Crossing) {
+        let (windowName, windowKey) = crossing.window == .fiveHour
+            ? ("5-hour", "fiveHour")
+            : ("7-day", "sevenDay")
+
         let content = UNMutableNotificationContent()
         content.title = "Claude Usage Warning"
-        content.body = threshold >= 90
-            ? "Usage at \(percent)% — approaching limit!"
-            : "Usage has reached \(percent)%"
+        content.body = crossing.threshold >= 90
+            ? "\(windowName) window at \(crossing.percent)% — approaching limit!"
+            : "\(windowName) window at \(crossing.percent)%"
         content.sound = .default
 
+        // Per-window identifier so a 5h notification never overwrites a 7d one.
         let request = UNNotificationRequest(
-            identifier: "usage-\(threshold)",
+            identifier: "usage-\(windowKey)-\(crossing.threshold)",
             content: content,
             trigger: nil
         )
@@ -248,21 +282,21 @@ final class UsageViewModel: ObservableObject {
     // MARK: - Usage History
 
     private func recordHistory(_ snapshot: UsageSnapshot) {
-        // Only sample every 5 minutes to build meaningful 24h history
-        if let last = usageHistory.last {
-            let elapsed = snapshot.fetchedAt.timeIntervalSince(last.timestamp)
-            if elapsed < Self.historySampleInterval { return }
-        }
-
         let point = UsageDataPoint(
             timestamp: snapshot.fetchedAt,
             fiveHourPercent: snapshot.fiveHourPercent,
             sevenDayPercent: snapshot.sevenDayPercent
         )
-        usageHistory.append(point)
-        if usageHistory.count > Self.maxHistoryPoints {
-            usageHistory.removeFirst(usageHistory.count - Self.maxHistoryPoints)
-        }
+        let updated = HistoryBuffer.appending(
+            point,
+            to: usageHistory,
+            maxPoints: Self.maxHistoryPoints,
+            minInterval: Self.historySampleInterval
+        )
+        // `appending` returns the input unchanged when the sample is skipped; only
+        // persist when a point was actually added (avoids redundant writes per tick).
+        guard updated.last?.timestamp != usageHistory.last?.timestamp else { return }
+        usageHistory = updated
         Self.saveHistory(usageHistory)
     }
 

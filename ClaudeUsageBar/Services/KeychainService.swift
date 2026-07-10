@@ -1,10 +1,18 @@
 import Foundation
 import Security
 
-struct CachedCredentials: Codable {
+struct CachedCredentials: Codable, Equatable {
     var accessToken: String
     var refreshToken: String?
     var expiresAt: Date?
+
+    /// Whether the access token has expired or will within `leeway`. Tokens without a
+    /// known expiry (`expiresAt == nil`) never report as needing a proactive refresh —
+    /// the reactive 401/403 path remains the safety net for those.
+    func needsRefresh(now: Date = Date(), leeway: TimeInterval = 300) -> Bool {
+        guard let expiresAt else { return false }
+        return expiresAt.timeIntervalSince(now) <= leeway
+    }
 }
 
 enum KeychainServiceError: Error {
@@ -16,55 +24,65 @@ enum KeychainService {
     private static let oauthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
     private static let oauthTokenURL = URL(string: "https://console.anthropic.com/v1/oauth/token")!
 
-    private static var cacheURL: URL {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    /// Where the app persists its own copy of the credentials. Injectable seam for tests.
+    /// `nonisolated(unsafe)`: the value is Sendable and only tests mutate it, from a single
+    /// thread — production code assigns it once at process start.
+    nonisolated(unsafe) static var store: CredentialStoring = KeychainCredentialStore()
+
+    /// Legacy plaintext cache written by pre-1.2 builds. Read once during migration, then
+    /// deleted. Overridable in tests so the migration path never touches the real path.
+    static var defaultLegacyCacheURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("ClaudeUsageBar", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent(".credentials.json")
+            .appendingPathComponent(".credentials.json")
     }
 
-    /// Returns cached credentials if present, otherwise reads from Claude Code's keychain
-    /// item (one-time prompt) and caches the full blob.
-    static func getCredentials() -> CachedCredentials? {
-        if let cached = readCachedCredentials() {
-            return cached
+    /// Returns credentials from the app-owned store; otherwise migrates from the legacy
+    /// plaintext file or, failing that, reads Claude Code's keychain item (one-time prompt).
+    static func getCredentials(legacyFileURL: URL = defaultLegacyCacheURL) -> CachedCredentials? {
+        // 1. App-owned store hit.
+        if let creds = store.load() {
+            return creds
         }
+        // 2. Migrate a legacy plaintext file, if one exists.
+        if let legacy = readLegacyCacheFile(at: legacyFileURL) {
+            store.save(legacy)
+            // Only delete the plaintext file once the store has verifiably persisted an
+            // equivalent copy — otherwise a failing store would destroy the sole copy.
+            if let roundTrip = store.load(), roundTrip == legacy {
+                try? FileManager.default.removeItem(at: legacyFileURL)
+                removeLegacyDirectoryIfEmpty(legacyFileURL)
+            }
+            return legacy
+        }
+        // 3. Fall through to Claude Code's keychain item (may prompt).
         guard let creds = readKeychainCredentials() else { return nil }
-        saveCachedCredentials(creds)
+        store.save(creds)
         return creds
-    }
-
-    /// Convenience: just the access token from cached credentials.
-    static func getOAuthToken() -> String? {
-        getCredentials()?.accessToken
     }
 
     /// Force re-read from Claude Code's keychain item. Triggers a password prompt.
     /// Should only be called from a user-initiated action (e.g., a Refresh button).
     static func refreshFromKeychain() -> CachedCredentials? {
-        deleteCachedCredentials()
+        store.delete()
         guard let creds = readKeychainCredentials() else { return nil }
-        saveCachedCredentials(creds)
+        store.save(creds)
         return creds
-    }
-
-    /// Update the in-file cache with fresh credentials (e.g., from OAuth refresh).
-    static func updateCachedCredentials(_ creds: CachedCredentials) {
-        saveCachedCredentials(creds)
     }
 
     // MARK: - OAuth refresh
 
     /// Exchange a refresh token for a new access token via Anthropic's OAuth endpoint.
-    /// Does not touch the keychain. On success, persists the new credentials to the cache file.
-    /// On failure throws — caller should fall back to the user-controlled refresh path.
+    /// Does not touch Claude Code's keychain item. On success, persists the new credentials
+    /// to the app-owned store. On failure throws — caller should fall back to the
+    /// user-controlled refresh path.
     static func refreshAccessToken(using refreshToken: String) async throws -> CachedCredentials {
         var request = URLRequest(url: oauthTokenURL)
         request.httpMethod = "POST"
         request.timeoutInterval = 10
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.setValue("application/json", forHTTPHeaderField: "accept")
-        request.setValue("ClaudeUsageBar/1.0", forHTTPHeaderField: "user-agent")
+        request.setValue(AppInfo.userAgent, forHTTPHeaderField: "user-agent")
 
         let body: [String: String] = [
             "grant_type": "refresh_token",
@@ -92,14 +110,17 @@ enum KeychainService {
             refreshToken: decoded.refresh_token ?? refreshToken,
             expiresAt: decoded.expires_in.map { Date().addingTimeInterval(TimeInterval($0)) }
         )
-        saveCachedCredentials(newCreds)
+        store.save(newCreds)
         return newCreds
     }
 
-    // MARK: - File cache
+    // MARK: - Legacy plaintext-file migration (one-shot, read-only)
 
-    private static func readCachedCredentials() -> CachedCredentials? {
-        guard let data = try? Data(contentsOf: cacheURL) else { return nil }
+    /// Reads and parses the legacy plaintext credential file. Kept only to migrate old
+    /// installs into the app-owned store; never written to. Preserves the historical
+    /// bare-token backward-compat branch.
+    private static func readLegacyCacheFile(at url: URL) -> CachedCredentials? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
         if let decoded = try? JSONDecoder().decode(CachedCredentials.self, from: data) {
             return decoded.accessToken.isEmpty ? nil : decoded
         }
@@ -111,16 +132,13 @@ enum KeychainService {
         return nil
     }
 
-    private static func saveCachedCredentials(_ creds: CachedCredentials) {
-        guard let data = try? JSONEncoder().encode(creds) else { return }
-        try? data.write(to: cacheURL, options: [.atomic, .completeFileProtection])
-        try? FileManager.default.setAttributes(
-            [.posixPermissions: 0o600], ofItemAtPath: cacheURL.path
-        )
-    }
-
-    private static func deleteCachedCredentials() {
-        try? FileManager.default.removeItem(at: cacheURL)
+    /// Removes the legacy `ClaudeUsageBar` support directory if the migration emptied it.
+    private static func removeLegacyDirectoryIfEmpty(_ fileURL: URL) {
+        let dir = fileURL.deletingLastPathComponent()
+        if let contents = try? FileManager.default.contentsOfDirectory(atPath: dir.path),
+           contents.isEmpty {
+            try? FileManager.default.removeItem(at: dir)
+        }
     }
 
     // MARK: - Claude Code keychain item (triggers password prompt)
@@ -157,7 +175,7 @@ enum KeychainService {
         return nil
     }
 
-    private static func parseCredentials(from data: Data) -> CachedCredentials? {
+    static func parseCredentials(from data: Data) -> CachedCredentials? {
         guard let str = String(data: data, encoding: .utf8) else { return nil }
 
         // Preferred path: parse the JSON blob Claude Code stores.
@@ -178,7 +196,7 @@ enum KeychainService {
         return nil
     }
 
-    private static func hexDecode(_ hex: String) -> Data? {
+    static func hexDecode(_ hex: String) -> Data? {
         let cleaned = hex.filter { $0.isHexDigit }
         guard cleaned.count % 2 == 0 else { return nil }
 

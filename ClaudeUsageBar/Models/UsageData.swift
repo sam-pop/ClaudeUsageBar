@@ -44,16 +44,25 @@ struct UsageSnapshot: Codable {
     }
 
     init(from response: UsageResponse) {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-
         self.init(
             fiveHourPercent: Int(response.fiveHour.utilization.rounded()),
             sevenDayPercent: Int(response.sevenDay.utilization.rounded()),
-            fiveHourResetsAt: formatter.date(from: response.fiveHour.resetsAt),
-            sevenDayResetsAt: formatter.date(from: response.sevenDay.resetsAt),
+            fiveHourResetsAt: Self.parseISO8601(response.fiveHour.resetsAt),
+            sevenDayResetsAt: Self.parseISO8601(response.sevenDay.resetsAt),
             fetchedAt: Date()
         )
+    }
+
+    /// Parses an ISO8601 timestamp, tolerating both fractional-seconds
+    /// (`…:00.000Z`) and plain (`…:00Z`) forms the API may return.
+    private static func parseISO8601(_ string: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: string) { return date }
+
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return plain.date(from: string)
     }
 
     func persist() {

@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    name: Build & Test
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build & test
+        run: |
+          xcodebuild \
+            -project ClaudeUsageBar.xcodeproj \
+            -scheme ClaudeUsageBar \
+            -destination 'platform=macOS' \
+            build test \
+            CODE_SIGN_IDENTITY=- \
+            CODE_SIGNING_ALLOWED=NO

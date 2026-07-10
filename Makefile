@@ -1,10 +1,13 @@
-.PHONY: generate build run install clean
+.PHONY: generate build test run install clean
 
 generate:
 	xcodegen generate
 
 build: generate
 	xcodebuild -project ClaudeUsageBar.xcodeproj -scheme ClaudeUsageBar -configuration Release build SYMROOT=build
+
+test: generate
+	xcodebuild -project ClaudeUsageBar.xcodeproj -scheme ClaudeUsageBar -destination 'platform=macOS' test CODE_SIGNING_ALLOWED=NO
 
 run: build
 	open build/Release/ClaudeUsageBar.app

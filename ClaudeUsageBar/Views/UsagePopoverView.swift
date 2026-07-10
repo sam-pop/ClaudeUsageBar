@@ -194,13 +194,39 @@ struct UsagePopoverView: View {
 
                 Spacer()
 
-                Toggle("Login", isOn: Binding(
+                Toggle("Launch at login", isOn: Binding(
                     get: { viewModel.launchAtLogin },
                     set: { _ in viewModel.toggleLaunchAtLogin() }
                 ))
                 .toggleStyle(.switch)
                 .controlSize(.mini)
                 .font(.caption2)
+            }
+
+            if let error = viewModel.launchAtLoginError {
+                Text(error)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+
+            if viewModel.notificationsAuthorized == false {
+                Button {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.notifications") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "bell.slash")
+                        Text("Notifications off — enable in System Settings")
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
             }
 
             HStack {
