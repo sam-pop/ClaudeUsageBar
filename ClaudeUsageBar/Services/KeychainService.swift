@@ -34,11 +34,6 @@ enum KeychainService {
         return creds
     }
 
-    /// Convenience: just the access token from cached credentials.
-    static func getOAuthToken() -> String? {
-        getCredentials()?.accessToken
-    }
-
     /// Force re-read from Claude Code's keychain item. Triggers a password prompt.
     /// Should only be called from a user-initiated action (e.g., a Refresh button).
     static func refreshFromKeychain() -> CachedCredentials? {
@@ -46,11 +41,6 @@ enum KeychainService {
         guard let creds = readKeychainCredentials() else { return nil }
         saveCachedCredentials(creds)
         return creds
-    }
-
-    /// Update the in-file cache with fresh credentials (e.g., from OAuth refresh).
-    static func updateCachedCredentials(_ creds: CachedCredentials) {
-        saveCachedCredentials(creds)
     }
 
     // MARK: - OAuth refresh

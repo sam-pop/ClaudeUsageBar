@@ -60,7 +60,8 @@ Or just `make run` to build and launch without installing.
 ## How It Works
 
 ```
-Keychain ──▶ KeychainService ──▶ Token Cache (5min TTL)
+Keychain ──▶ KeychainService ──▶ Persistent credential cache
+                                  + reactive OAuth refresh on 401/403
                                         │
                                         ▼
 Anthropic API ◀──── UsageAPIService (auto-retry) ────▶ UsageViewModel
@@ -79,7 +80,7 @@ Anthropic API ◀──── UsageAPIService (auto-retry) ────▶ Usage
 |---------|--------|
 | **Adaptive refresh** | 30s when usage ≥ 75%, 60s normal, 120s when < 25% |
 | **Notifications** | System alerts at 80% and 90% usage |
-| **Token caching** | 5-minute TTL to reduce Keychain reads |
+| **Credential caching** | Persistent cache avoids repeated Keychain reads; OAuth refresh token reactively renews the access token on 401/403 |
 | **Auto-retry** | Retries transient errors; refreshes token on 401/403 |
 | **24h sparkline** | Samples every 5min, up to 288 points with time axis labels |
 | **Persistence** | Last known data + history saved to UserDefaults |
