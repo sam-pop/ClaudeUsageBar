@@ -24,3 +24,23 @@ targets:
         MARKETING_VERSION: "1.1.0"
         CURRENT_PROJECT_VERSION: "1"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  ClaudeUsageBarTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: ClaudeUsageBarTests
+      - path: ClaudeUsageBar
+        excludes: ["ClaudeUsageBarApp.swift"]
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "6.0"
+        PRODUCT_BUNDLE_IDENTIFIER: com.sam.ClaudeUsageBarTests
+schemes:
+  ClaudeUsageBar:
+    build:
+      targets:
+        ClaudeUsageBar: all
+        ClaudeUsageBarTests: [test]
+    test:
+      targets: [ClaudeUsageBarTests]
