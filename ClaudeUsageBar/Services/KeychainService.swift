@@ -147,7 +147,7 @@ enum KeychainService {
         return nil
     }
 
-    private static func parseCredentials(from data: Data) -> CachedCredentials? {
+    static func parseCredentials(from data: Data) -> CachedCredentials? {
         guard let str = String(data: data, encoding: .utf8) else { return nil }
 
         // Preferred path: parse the JSON blob Claude Code stores.
@@ -168,7 +168,7 @@ enum KeychainService {
         return nil
     }
 
-    private static func hexDecode(_ hex: String) -> Data? {
+    static func hexDecode(_ hex: String) -> Data? {
         let cleaned = hex.filter { $0.isHexDigit }
         guard cleaned.count % 2 == 0 else { return nil }
 

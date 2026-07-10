@@ -54,41 +54,24 @@ final class UsageViewModel: ObservableObject {
     }
 
     var menuBarText: String {
-        guard let s = snapshot else { return "--%" }
-        let (percent, resetDate) = activeMenuBarValues(s)
-        let countdown = Self.resetCountdown(until: resetDate)
+        guard let active = MenuBarSelection.active(mode: menuBarDisplayMode, snapshot: snapshot) else {
+            return "--%"
+        }
+        let countdown = Self.resetCountdown(until: active.resetsAt)
         let suffix = (countdown == "—" || countdown == "now") ? "" : " · \(countdown)"
-        return "\(percent)%\(suffix)"
+        return "\(active.percent)%\(suffix)"
     }
 
     var menuBarColor: Color {
-        guard let s = snapshot else { return .primary }
-        let (percent, _) = activeMenuBarValues(s)
-        return Self.color(for: percent)
+        guard let active = MenuBarSelection.active(mode: menuBarDisplayMode, snapshot: snapshot) else {
+            return .primary
+        }
+        return Self.color(for: active.percent)
     }
 
     var menuBarActiveWindow: MenuBarDisplayMode {
-        guard let s = snapshot else { return menuBarDisplayMode == .auto ? .fiveHour : menuBarDisplayMode }
-        switch menuBarDisplayMode {
-        case .fiveHour, .sevenDay: return menuBarDisplayMode
-        case .auto:
-            return s.fiveHourPercent >= s.sevenDayPercent ? .fiveHour : .sevenDay
-        }
-    }
-
-    private func activeMenuBarValues(_ s: UsageSnapshot) -> (percent: Int, resetDate: Date?) {
-        switch menuBarDisplayMode {
-        case .fiveHour:
-            return (s.fiveHourPercent, s.fiveHourResetsAt)
-        case .sevenDay:
-            return (s.sevenDayPercent, s.sevenDayResetsAt)
-        case .auto:
-            if s.fiveHourPercent >= s.sevenDayPercent {
-                return (s.fiveHourPercent, s.fiveHourResetsAt)
-            } else {
-                return (s.sevenDayPercent, s.sevenDayResetsAt)
-            }
-        }
+        MenuBarSelection.active(mode: menuBarDisplayMode, snapshot: snapshot)?.window
+            ?? (menuBarDisplayMode == .auto ? .fiveHour : menuBarDisplayMode)
     }
 
     var isStaleData: Bool {
@@ -248,21 +231,21 @@ final class UsageViewModel: ObservableObject {
     // MARK: - Usage History
 
     private func recordHistory(_ snapshot: UsageSnapshot) {
-        // Only sample every 5 minutes to build meaningful 24h history
-        if let last = usageHistory.last {
-            let elapsed = snapshot.fetchedAt.timeIntervalSince(last.timestamp)
-            if elapsed < Self.historySampleInterval { return }
-        }
-
         let point = UsageDataPoint(
             timestamp: snapshot.fetchedAt,
             fiveHourPercent: snapshot.fiveHourPercent,
             sevenDayPercent: snapshot.sevenDayPercent
         )
-        usageHistory.append(point)
-        if usageHistory.count > Self.maxHistoryPoints {
-            usageHistory.removeFirst(usageHistory.count - Self.maxHistoryPoints)
-        }
+        let updated = HistoryBuffer.appending(
+            point,
+            to: usageHistory,
+            maxPoints: Self.maxHistoryPoints,
+            minInterval: Self.historySampleInterval
+        )
+        // `appending` returns the input unchanged when the sample is skipped; only
+        // persist when a point was actually added (avoids redundant writes per tick).
+        guard updated.last?.timestamp != usageHistory.last?.timestamp else { return }
+        usageHistory = updated
         Self.saveHistory(usageHistory)
     }
 
