@@ -13,7 +13,8 @@ run: build
 	open build/Release/ClaudeUsageBar.app
 
 install: build
-	cp -R build/Release/ClaudeUsageBar.app /Applications/ClaudeUsageBar.app
+	rm -rf /Applications/ClaudeUsageBar.app
+	cp -R build/Release/ClaudeUsageBar.app /Applications/
 	@echo "Installed to /Applications/ClaudeUsageBar.app"
 
 clean:
