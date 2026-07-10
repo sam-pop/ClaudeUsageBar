@@ -155,6 +155,41 @@ struct KeychainMigrationTests {
     }
 }
 
+// MARK: - CachedCredentials.needsRefresh
+
+@Suite("CachedCredentials.needsRefresh")
+struct CachedCredentialsNeedsRefreshTests {
+
+    private let now = Date(timeIntervalSince1970: 1_000_000)
+
+    @Test("Expiring within the leeway window returns true")
+    func expiringSoon() {
+        let creds = CachedCredentials(accessToken: "t", refreshToken: "r",
+                                      expiresAt: now.addingTimeInterval(120)) // 2 min out
+        #expect(creds.needsRefresh(now: now, leeway: 300))
+    }
+
+    @Test("Far-future expiry returns false")
+    func farFuture() {
+        let creds = CachedCredentials(accessToken: "t", refreshToken: "r",
+                                      expiresAt: now.addingTimeInterval(3600)) // 1 hour out
+        #expect(!creds.needsRefresh(now: now, leeway: 300))
+    }
+
+    @Test("Nil expiresAt returns false")
+    func nilExpiry() {
+        let creds = CachedCredentials(accessToken: "t", refreshToken: "r", expiresAt: nil)
+        #expect(!creds.needsRefresh(now: now, leeway: 300))
+    }
+
+    @Test("Already-expired token returns true")
+    func alreadyExpired() {
+        let creds = CachedCredentials(accessToken: "t", refreshToken: "r",
+                                      expiresAt: now.addingTimeInterval(-60)) // expired 1 min ago
+        #expect(creds.needsRefresh(now: now, leeway: 300))
+    }
+}
+
 // MARK: - UsageAPIError classification
 
 @Suite("UsageAPIError classification")

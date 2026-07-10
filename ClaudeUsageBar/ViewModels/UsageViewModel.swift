@@ -121,8 +121,16 @@ final class UsageViewModel: ObservableObject {
     }
 
     private func fetchWithRetry() async throws -> UsageSnapshot {
-        guard let creds = getCredentials() else {
+        guard var creds = getCredentials() else {
             throw UsageAPIError.noToken
+        }
+
+        // Proactive refresh: if the token is expiring soon, swap it out before the first
+        // call. On failure we proceed with the old token; the reactive 401/403 path below
+        // stays as the safety net.
+        if creds.needsRefresh(), let refreshed = await tryOAuthRefresh(using: creds) {
+            cachedCredentials = refreshed
+            creds = refreshed
         }
 
         do {

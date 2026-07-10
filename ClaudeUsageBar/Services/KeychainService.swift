@@ -5,6 +5,14 @@ struct CachedCredentials: Codable, Equatable {
     var accessToken: String
     var refreshToken: String?
     var expiresAt: Date?
+
+    /// Whether the access token has expired or will within `leeway`. Tokens without a
+    /// known expiry (`expiresAt == nil`) never report as needing a proactive refresh —
+    /// the reactive 401/403 path remains the safety net for those.
+    func needsRefresh(now: Date = Date(), leeway: TimeInterval = 300) -> Bool {
+        guard let expiresAt else { return false }
+        return expiresAt.timeIntervalSince(now) <= leeway
+    }
 }
 
 enum KeychainServiceError: Error {
