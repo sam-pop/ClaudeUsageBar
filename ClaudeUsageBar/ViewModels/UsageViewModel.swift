@@ -133,24 +133,36 @@ final class UsageViewModel: ObservableObject {
             creds = refreshed
         }
 
-        do {
-            let response = try await UsageAPIService.fetch(token: creds.accessToken)
-            return UsageSnapshot(from: response)
-        } catch let error as UsageAPIError where error.isAuthError {
-            // Try OAuth refresh-token flow first. On success we never touch the keychain.
-            if let refreshed = await tryOAuthRefresh(using: creds) {
-                cachedCredentials = refreshed
-                let response = try await UsageAPIService.fetch(token: refreshed.accessToken)
+        // Retry only transient errors, with exponential backoff. Auth errors bypass the
+        // loop and take the OAuth/keychain refresh path; other errors propagate as-is.
+        let policy = RetryPolicy()
+        var rng = SystemRandomNumberGenerator()
+        var lastError: UsageAPIError?
+
+        for attempt in 1...policy.maxAttempts {
+            do {
+                let response = try await UsageAPIService.fetch(token: creds.accessToken)
                 return UsageSnapshot(from: response)
+            } catch let error as UsageAPIError where error.isAuthError {
+                // Try OAuth refresh-token flow first. On success we never touch the keychain.
+                if let refreshed = await tryOAuthRefresh(using: creds) {
+                    cachedCredentials = refreshed
+                    let response = try await UsageAPIService.fetch(token: refreshed.accessToken)
+                    return UsageSnapshot(from: response)
+                }
+                // Refresh failed (or no refresh token) — surface a user-actionable error
+                // instead of silently prompting from the keychain.
+                throw UsageAPIError.tokenExpired
+            } catch let error as UsageAPIError where error.isTransient {
+                lastError = error
+                if attempt < policy.maxAttempts {
+                    let delay = policy.delay(forAttempt: attempt, using: &rng)
+                    try? await Task.sleep(for: .seconds(delay))
+                }
             }
-            // Refresh failed (or no refresh token) — surface a user-actionable error
-            // instead of silently prompting from the keychain.
-            throw UsageAPIError.tokenExpired
-        } catch let error as UsageAPIError where error.isTransient {
-            try? await Task.sleep(for: .seconds(2))
-            let response = try await UsageAPIService.fetch(token: creds.accessToken)
-            return UsageSnapshot(from: response)
         }
+        // Every attempt hit a transient failure — rethrow the last one.
+        throw lastError ?? UsageAPIError.invalidResponse(-1)
     }
 
     // MARK: - Credentials
