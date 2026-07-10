@@ -14,6 +14,8 @@ final class UsageViewModel: ObservableObject {
 
     @Published var state: LoadingState = .idle
     @Published var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled
+    @Published var launchAtLoginError: String?
+    @Published var notificationsAuthorized: Bool?
     @Published var usageHistory: [UsageDataPoint] = []
     @Published var needsManualRefresh: Bool = false
     @Published var menuBarDisplayMode: MenuBarDisplayMode {
@@ -40,8 +42,9 @@ final class UsageViewModel: ObservableObject {
         }
         usageHistory = Self.loadHistory()
 
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
-
+        Task { [weak self] in
+            await self?.requestNotificationAuthorization()
+        }
         Task { [weak self] in
             await self?.refresh()
         }
@@ -212,12 +215,24 @@ final class UsageViewModel: ObservableObject {
                 try SMAppService.mainApp.register()
             }
             launchAtLogin = SMAppService.mainApp.status == .enabled
+            launchAtLoginError = nil
         } catch {
-            // Silently fail — user can retry
+            // Surface the failure and snap the toggle back to the real status.
+            launchAtLoginError = "Couldn't change launch-at-login: \(error.localizedDescription)"
+            launchAtLogin = SMAppService.mainApp.status == .enabled
         }
     }
 
     // MARK: - Notifications
+
+    /// Requests notification authorization, then re-reads the live settings so a
+    /// Settings-app revocation (which won't re-prompt) is still reflected in the UI.
+    private func requestNotificationAuthorization() async {
+        let center = UNUserNotificationCenter.current()
+        _ = try? await center.requestAuthorization(options: [.alert, .sound])
+        let settings = await center.notificationSettings()
+        notificationsAuthorized = settings.authorizationStatus == .authorized
+    }
 
     private func checkThresholds(_ snapshot: UsageSnapshot) {
         let percent = snapshot.higherPercent
