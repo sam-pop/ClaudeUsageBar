@@ -1,0 +1,508 @@
+<title>Claude Usage — Horizontal Popover Redesign</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --clay: #E8896B;
+    --clay-dim: rgba(232,137,107,.16);
+    /* severity (shared across themes, tuned for dark ground first) */
+    --lvl-low: #3FB950;
+    --lvl-mid: #E3B341;
+    --lvl-high: #F0883E;
+    --lvl-crit: #F85149;
+    --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    --mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, monospace;
+    --r: 12px;
+
+    /* dark tokens (default) */
+    --canvas: #131417;
+    --canvas-2: #0d0e10;
+    --pop: rgba(34,35,39,.92);
+    --pop-border: rgba(255,255,255,.09);
+    --card: rgba(255,255,255,.035);
+    --card-border: rgba(255,255,255,.07);
+    --card-hi: rgba(255,255,255,.06);
+    --track: rgba(255,255,255,.10);
+    --t1: rgba(255,255,255,.93);
+    --t2: rgba(255,255,255,.56);
+    --t3: rgba(255,255,255,.34);
+    --shadow: 0 18px 50px rgba(0,0,0,.55), 0 2px 8px rgba(0,0,0,.4);
+    --menubar: rgba(28,28,30,.72);
+    --amber-bg: rgba(240,136,62,.14);
+    --amber-line: rgba(240,136,62,.4);
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --canvas: #e4e3df; --canvas-2: #d8d7d2;
+      --pop: rgba(248,247,245,.94);
+      --pop-border: rgba(0,0,0,.10);
+      --card: rgba(0,0,0,.028);
+      --card-border: rgba(0,0,0,.08);
+      --card-hi: rgba(0,0,0,.05);
+      --track: rgba(0,0,0,.10);
+      --t1: rgba(20,20,22,.94); --t2: rgba(20,20,22,.58); --t3: rgba(20,20,22,.36);
+      --shadow: 0 16px 44px rgba(0,0,0,.20), 0 2px 6px rgba(0,0,0,.10);
+      --menubar: rgba(250,250,250,.75);
+      --lvl-low:#1a7f37; --lvl-mid:#9a6700; --lvl-high:#bc4c00; --lvl-crit:#cf222e;
+      --amber-bg: rgba(188,76,0,.10); --amber-line: rgba(188,76,0,.35);
+    }
+  }
+  :root[data-theme="dark"] {
+    --canvas:#131417; --canvas-2:#0d0e10; --pop:rgba(34,35,39,.92); --pop-border:rgba(255,255,255,.09);
+    --card:rgba(255,255,255,.035); --card-border:rgba(255,255,255,.07); --card-hi:rgba(255,255,255,.06);
+    --track:rgba(255,255,255,.10); --t1:rgba(255,255,255,.93); --t2:rgba(255,255,255,.56); --t3:rgba(255,255,255,.34);
+    --shadow:0 18px 50px rgba(0,0,0,.55),0 2px 8px rgba(0,0,0,.4); --menubar:rgba(28,28,30,.72);
+    --lvl-low:#3FB950; --lvl-mid:#E3B341; --lvl-high:#F0883E; --lvl-crit:#F85149;
+    --amber-bg:rgba(240,136,62,.14); --amber-line:rgba(240,136,62,.4);
+  }
+  :root[data-theme="light"] {
+    --canvas:#e4e3df; --canvas-2:#d8d7d2; --pop:rgba(248,247,245,.94); --pop-border:rgba(0,0,0,.10);
+    --card:rgba(0,0,0,.028); --card-border:rgba(0,0,0,.08); --card-hi:rgba(0,0,0,.05);
+    --track:rgba(0,0,0,.10); --t1:rgba(20,20,22,.94); --t2:rgba(20,20,22,.58); --t3:rgba(20,20,22,.36);
+    --shadow:0 16px 44px rgba(0,0,0,.20),0 2px 6px rgba(0,0,0,.10); --menubar:rgba(250,250,250,.75);
+    --lvl-low:#1a7f37; --lvl-mid:#9a6700; --lvl-high:#bc4c00; --lvl-crit:#cf222e;
+    --amber-bg:rgba(188,76,0,.10); --amber-line:rgba(188,76,0,.35);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: var(--font);
+    color: var(--t1);
+    background:
+      radial-gradient(1200px 700px at 80% -10%, rgba(232,137,107,.10), transparent 60%),
+      linear-gradient(180deg, var(--canvas), var(--canvas-2));
+    min-height: 100vh;
+    padding: 40px clamp(16px,4vw,56px) 80px;
+    -webkit-font-smoothing: antialiased;
+    line-height: 1.45;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+
+  /* ---------- page chrome ---------- */
+  .pagehead { display:flex; align-items:flex-start; justify-content:space-between; gap:24px; flex-wrap:wrap; margin-bottom:8px; }
+  .pagehead h1 { font-size:26px; font-weight:680; letter-spacing:-.02em; text-wrap:balance; }
+  .pagehead p { color:var(--t2); font-size:14px; max-width:56ch; margin-top:8px; }
+  .toggle {
+    display:inline-flex; gap:2px; padding:3px; border-radius:10px;
+    background:var(--card); border:1px solid var(--card-border); flex:0 0 auto;
+  }
+  .toggle button {
+    font:inherit; font-size:12px; font-weight:560; color:var(--t2);
+    background:none; border:0; padding:7px 13px; border-radius:7px; cursor:pointer;
+  }
+  .toggle button[aria-pressed="true"] { background:var(--clay); color:#231a16; }
+
+  .options { display:grid; grid-template-columns:1fr; gap:44px; margin-top:36px; }
+  @media (min-width: 980px) { .options { grid-template-columns:1fr 1fr; align-items:start; } }
+
+  .opt-head { display:flex; align-items:baseline; gap:10px; margin-bottom:6px; }
+  .opt-tag { font-size:11px; font-weight:700; letter-spacing:.09em; text-transform:uppercase;
+    color:var(--clay); background:var(--clay-dim); padding:4px 9px; border-radius:6px; }
+  .opt-head h2 { font-size:17px; font-weight:640; letter-spacing:-.01em; }
+  .opt-sub { color:var(--t2); font-size:13px; margin:2px 0 20px; max-width:46ch; }
+
+  /* ---------- menu bar context ---------- */
+  .menubar {
+    display:flex; justify-content:flex-end; align-items:center; gap:18px;
+    height:26px; padding:0 14px; border-radius:8px;
+    background:var(--menubar); border:1px solid var(--pop-border);
+    backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px);
+    margin-bottom:14px; font-size:12.5px; color:var(--t1);
+  }
+  .menubar .mi { color:var(--t2); font-variant-numeric:tabular-nums; }
+  .menubar .statusitem { display:inline-flex; align-items:center; gap:7px; font-variant-numeric:tabular-nums; }
+  .menubar .statusitem b { font-weight:600; }
+  .caret { color:var(--t3); }
+
+  /* ---------- popover shell ---------- */
+  .popover {
+    background:var(--pop); border:1px solid var(--pop-border); border-radius:16px;
+    box-shadow:var(--shadow);
+    backdrop-filter:blur(30px) saturate(160%); -webkit-backdrop-filter:blur(30px) saturate(160%);
+    overflow:hidden;
+  }
+  .pop-top {
+    display:flex; align-items:center; gap:9px; padding:13px 15px 12px;
+    border-bottom:1px solid var(--card-border);
+  }
+  .spark { color:var(--clay); font-size:15px; }
+  .pop-top h3 { font-size:13.5px; font-weight:640; letter-spacing:-.01em; flex:1; }
+  .seg {
+    display:inline-flex; gap:1px; padding:2px; border-radius:8px;
+    background:var(--track); border:1px solid var(--card-border);
+  }
+  .seg button {
+    font:inherit; font-size:11px; font-weight:560; color:var(--t2);
+    background:none; border:0; padding:4px 9px; border-radius:6px; cursor:pointer; line-height:1;
+  }
+  .seg button[aria-pressed="true"] { background:var(--pop); color:var(--t1); box-shadow:0 1px 2px rgba(0,0,0,.25); }
+  .icon-btn { background:none;border:0;color:var(--t3);cursor:pointer;font-size:14px;padding:4px;border-radius:6px; }
+  .icon-btn:hover { color:var(--t1); background:var(--card-hi); }
+
+  .pop-foot {
+    display:flex; align-items:center; justify-content:center; gap:7px;
+    padding:11px; border-top:1px solid var(--card-border); color:var(--t2);
+    font-size:12.5px; font-weight:540; cursor:pointer;
+  }
+  .pop-foot:hover { color:var(--t1); background:var(--card-hi); }
+
+  /* ---------- account identity ---------- */
+  .dot { width:8px; height:8px; border-radius:50%; flex:0 0 auto; box-shadow:0 0 0 3px color-mix(in srgb, currentColor 18%, transparent); }
+  .acct-name { font-size:13px; font-weight:620; letter-spacing:-.01em; }
+  .acct-mail { font-size:11px; color:var(--t3); }
+  .fresh { font-size:10.5px; color:var(--t3); display:inline-flex; align-items:center; gap:4px; font-variant-numeric:tabular-nums; }
+  .stale { color:var(--lvl-high); }
+  .refresh-pill {
+    font-size:10px; font-weight:600; color:var(--lvl-high);
+    background:var(--amber-bg); border:1px solid var(--amber-line);
+    padding:2px 7px; border-radius:20px; cursor:pointer; display:inline-flex; gap:4px; align-items:center;
+  }
+
+  /* severity utilities */
+  .low{color:var(--lvl-low)} .mid{color:var(--lvl-mid)} .high{color:var(--lvl-high)} .crit{color:var(--lvl-crit)}
+  .bar { height:5px; border-radius:3px; background:var(--track); overflow:hidden; }
+  .bar > i { display:block; height:100%; border-radius:3px; }
+  .bg-low{background:var(--lvl-low)} .bg-mid{background:var(--lvl-mid)} .bg-high{background:var(--lvl-high)} .bg-crit{background:var(--lvl-crit)}
+  .num { font-variant-numeric:tabular-nums; font-feature-settings:"tnum"; }
+  .reset { font-family:var(--mono); font-size:10.5px; color:var(--t2); font-variant-numeric:tabular-nums; }
+  .reset .lbl { color:var(--t3); }
+
+  /* ======================================================
+     OPTION A — Account Columns
+     ====================================================== */
+  .cols { display:grid; grid-template-columns:1fr 1fr; }
+  .col { padding:14px 14px 6px; }
+  .col + .col { border-left:1px solid var(--card-border); }
+  .col-head { display:flex; align-items:flex-start; gap:8px; margin-bottom:2px; }
+  .col-head .id { flex:1; min-width:0; }
+  .col-head .id .row1 { display:flex; align-items:center; gap:7px; }
+  .col-head .acct-mail { display:block; margin-top:1px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .col-fresh { margin:6px 0 12px; display:flex; align-items:center; gap:8px; min-height:18px; }
+
+  .metric { margin-bottom:13px; }
+  .metric .mrow { display:flex; align-items:baseline; justify-content:space-between; margin-bottom:6px; }
+  .metric .mlabel { font-size:11px; font-weight:560; color:var(--t2); }
+  .metric .mval { font-size:22px; font-weight:700; letter-spacing:-.02em; }
+  .metric .mreset { margin-top:5px; }
+  .metric.worst { position:relative; }
+
+  .model-tag { font-size:9px; font-weight:700; letter-spacing:.05em; text-transform:uppercase;
+    color:var(--t3); border:1px solid var(--card-border); border-radius:5px; padding:1px 5px; }
+
+  .sparkbox { margin:4px 0 10px; }
+  .sparkbox svg { width:100%; height:34px; display:block; }
+
+  /* ======================================================
+     OPTION B — Comparison Matrix
+     ====================================================== */
+  .matrix { padding:6px 4px 4px; }
+  .mgrid { display:grid; grid-template-columns:74px 1fr 1fr; }
+  .mgrid > div { padding:11px 13px; border-bottom:1px solid var(--card-border); }
+  .mgrid .chead { border-bottom:1px solid var(--card-border); padding:12px 13px 11px; }
+  .mgrid .colsep { border-left:1px solid var(--card-border); }
+  .corner { border-bottom:1px solid var(--card-border) !important; }
+
+  .chead .row1 { display:flex; align-items:center; gap:7px; }
+  .chead .acct-mail { display:block; margin:2px 0 7px 15px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+  .rlabel { display:flex; flex-direction:column; justify-content:center; gap:2px; }
+  .rlabel .r-t { font-size:12px; font-weight:600; }
+  .rlabel .r-s { font-size:10px; color:var(--t3); }
+
+  .cell { display:flex; flex-direction:column; gap:6px; position:relative; }
+  .cell .top { display:flex; align-items:baseline; justify-content:space-between; }
+  .cell .cval { font-size:19px; font-weight:700; letter-spacing:-.02em; }
+  .cell .creset { }
+  .cell.leader::before {
+    content:""; position:absolute; left:-13px; top:8px; bottom:8px; width:2.5px; border-radius:2px; background:var(--clay);
+  }
+  .cell.leader .flag { font-size:9px; font-weight:700; letter-spacing:.05em; color:var(--clay); text-transform:uppercase; }
+  .mgrid .trendrow { padding:10px 13px 12px; border-bottom:0; }
+  .trendrow svg { width:100%; height:26px; display:block; }
+  .foot-fresh { display:flex; align-items:center; gap:7px; }
+
+  /* ---------- annotations ---------- */
+  .notes { margin-top:20px; padding:16px 18px; border-radius:12px; background:var(--card); border:1px solid var(--card-border); }
+  .notes h4 { font-size:12px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:var(--t2); margin-bottom:11px; }
+  .notes ul { list-style:none; display:flex; flex-direction:column; gap:9px; }
+  .notes li { font-size:13px; color:var(--t2); display:flex; gap:9px; line-height:1.5; }
+  .notes li b { color:var(--t1); font-weight:600; }
+  .notes .tick { color:var(--clay); flex:0 0 auto; font-weight:700; }
+
+  .legend { display:flex; gap:16px; flex-wrap:wrap; margin-top:40px; padding-top:22px; border-top:1px solid var(--card-border); }
+  .legend span { display:inline-flex; align-items:center; gap:7px; font-size:12px; color:var(--t2); }
+  .legend i { width:11px; height:11px; border-radius:3px; }
+
+  .verdict { margin-top:40px; padding:20px 22px; border-radius:14px;
+    background:linear-gradient(180deg, var(--clay-dim), transparent); border:1px solid var(--amber-line); }
+  .verdict h3 { font-size:14px; font-weight:680; margin-bottom:8px; }
+  .verdict p { font-size:13.5px; color:var(--t2); max-width:75ch; line-height:1.55; }
+  .verdict b { color:var(--t1); }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .bar > i { transition: width .5s cubic-bezier(.4,0,.2,1); }
+  }
+  :focus-visible { outline:2px solid var(--clay); outline-offset:2px; border-radius:4px; }
+</style>
+
+<div class="wrap">
+  <div class="pagehead">
+    <div>
+      <h1>Claude Usage — horizontal popover</h1>
+      <p>Two directions for laying accounts out side by side so the same stat is easy to compare. Real data from your two accounts. Toggle the theme to check both.</p>
+    </div>
+    <div class="toggle" role="group" aria-label="Theme">
+      <button data-theme-btn="light" aria-pressed="false">Light</button>
+      <button data-theme-btn="dark" aria-pressed="true">Dark</button>
+    </div>
+  </div>
+
+  <div class="options">
+
+    <!-- ============ OPTION A ============ -->
+    <section>
+      <div class="opt-head"><span class="opt-tag">Option A</span><h2>Account columns</h2></div>
+      <p class="opt-sub">Each account becomes a column. Smallest leap from today — metric rows line up across columns, so you scan left-to-right at the same height.</p>
+
+      <div class="menubar" aria-label="macOS menu bar preview">
+        <span class="mi">Fri 9:41</span>
+        <span class="statusitem"><span class="dot" style="color:#4A9EFF;background:#4A9EFF"></span><b class="num">S 64%</b><span style="color:var(--t3)">·</span><span class="dot" style="color:#B084F5;background:#B084F5"></span><b class="num crit">W 100%</b> <span class="caret">▾</span></span>
+      </div>
+
+      <div class="popover">
+        <div class="pop-top">
+          <span class="spark">✦</span>
+          <h3>Claude Usage</h3>
+          <span class="seg" role="group" aria-label="Window">
+            <button aria-pressed="true">Auto</button><button aria-pressed="false">5h</button><button aria-pressed="false">7d</button>
+          </span>
+        </div>
+
+        <div class="cols">
+          <!-- Account: Sam -->
+          <div class="col">
+            <div class="col-head">
+              <div class="id">
+                <div class="row1"><span class="dot" style="color:#4A9EFF;background:#4A9EFF"></span><span class="acct-name">Sam</span></div>
+                <span class="acct-mail">poplovitch.samuel@gmail.com</span>
+              </div>
+              <button class="icon-btn" title="Edit">✎</button>
+            </div>
+            <div class="col-fresh"><span class="fresh">● Updated just now</span></div>
+
+            <div class="metric">
+              <div class="mrow"><span class="mlabel">5-Hour</span><span class="mval low num">1%</span></div>
+              <div class="bar"><i class="bg-low" style="width:1%"></i></div>
+              <div class="mreset reset"><span class="lbl">resets</span> 4h 33m</div>
+            </div>
+            <div class="metric">
+              <div class="mrow"><span class="mlabel">7-Day</span><span class="mval mid num">64%</span></div>
+              <div class="bar"><i class="bg-mid" style="width:64%"></i></div>
+              <div class="mreset reset"><span class="lbl">resets</span> 5d 13h</div>
+            </div>
+            <div class="metric">
+              <div class="mrow"><span class="mlabel">Fable <span class="model-tag">wk</span></span><span class="mval crit num">100%</span></div>
+              <div class="bar"><i class="bg-crit" style="width:100%"></i></div>
+              <div class="mreset reset"><span class="lbl">resets</span> 5d 13h</div>
+            </div>
+
+            <div class="sparkbox" aria-hidden="true">
+              <svg viewBox="0 0 220 34" preserveAspectRatio="none">
+                <polyline points="0,26 30,25 60,24 90,25 120,10 150,9 180,10 220,9" fill="none" stroke="#4A9EFF" stroke-width="1.6" stroke-linejoin="round"/>
+                <circle cx="220" cy="9" r="2.4" fill="#4A9EFF"/>
+              </svg>
+            </div>
+          </div>
+
+          <!-- Account: Work (stale) -->
+          <div class="col">
+            <div class="col-head">
+              <div class="id">
+                <div class="row1"><span class="dot" style="color:#B084F5;background:#B084F5"></span><span class="acct-name">Work</span></div>
+                <span class="acct-mail">sam@legal-innovators.com</span>
+              </div>
+              <button class="icon-btn" title="Edit">✎</button>
+            </div>
+            <div class="col-fresh"><span class="refresh-pill">↻ Stale · 7h ago</span></div>
+
+            <div class="metric worst">
+              <div class="mrow"><span class="mlabel">5-Hour</span><span class="mval crit num">100%</span></div>
+              <div class="bar"><i class="bg-crit" style="width:100%"></i></div>
+              <div class="mreset reset"><span class="lbl">resets</span> 38m</div>
+            </div>
+            <div class="metric">
+              <div class="mrow"><span class="mlabel">7-Day</span><span class="mval mid num">50%</span></div>
+              <div class="bar"><i class="bg-mid" style="width:50%"></i></div>
+              <div class="mreset reset"><span class="lbl">resets</span> 4d 18h</div>
+            </div>
+            <div class="metric">
+              <div class="mrow"><span class="mlabel">Fable <span class="model-tag">wk</span></span><span class="mval mid num">73%</span></div>
+              <div class="bar"><i class="bg-mid" style="width:73%"></i></div>
+              <div class="mreset reset"><span class="lbl">resets</span> 5d 1h</div>
+            </div>
+
+            <div class="sparkbox" aria-hidden="true">
+              <svg viewBox="0 0 220 34" preserveAspectRatio="none">
+                <polyline points="0,14 30,12 60,13 90,8 120,6 150,5 180,5 220,4" fill="none" stroke="#B084F5" stroke-width="1.6" stroke-linejoin="round"/>
+                <circle cx="220" cy="4" r="2.4" fill="#B084F5"/>
+              </svg>
+            </div>
+          </div>
+        </div>
+
+        <div class="pop-foot">＋ Add current account</div>
+      </div>
+
+      <div class="notes">
+        <h4>UX upgrades</h4>
+        <ul>
+          <li><span class="tick">✓</span><span><b>Row alignment.</b> 5-Hour / 7-Day / Fable sit at the same height in both columns — compare by scanning across.</span></li>
+          <li><span class="tick">✓</span><span><b>Staleness is loud.</b> "Updated 436m ago" becomes an actionable <b>↻ Stale · 7h ago</b> pill in the account's accent — one click to refresh.</span></li>
+          <li><span class="tick">✓</span><span><b>Reset = the bug we just fixed.</b> Work's 5-Hour rolls to a live countdown instead of sticking at "now".</span></li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ============ OPTION B ============ -->
+    <section>
+      <div class="opt-head"><span class="opt-tag">Option B</span><h2>Comparison matrix</h2></div>
+      <p class="opt-sub">Metrics become rows, accounts become columns. Reading a single row answers "who's hottest on 5-Hour?" instantly — the leader is flagged. Best fit for your actual goal.</p>
+
+      <div class="menubar" aria-label="macOS menu bar preview">
+        <span class="mi">Fri 9:41</span>
+        <span class="statusitem"><span class="dot" style="color:#4A9EFF;background:#4A9EFF"></span><b class="num">S 64%</b><span style="color:var(--t3)">·</span><span class="dot" style="color:#B084F5;background:#B084F5"></span><b class="num crit">W 100%</b> <span class="caret">▾</span></span>
+      </div>
+
+      <div class="popover">
+        <div class="pop-top">
+          <span class="spark">✦</span>
+          <h3>Claude Usage</h3>
+          <span class="seg" role="group" aria-label="Window">
+            <button aria-pressed="true">Auto</button><button aria-pressed="false">5h</button><button aria-pressed="false">7d</button>
+          </span>
+        </div>
+
+        <div class="matrix">
+          <div class="mgrid">
+            <!-- header row -->
+            <div class="corner"></div>
+            <div class="chead">
+              <div class="row1"><span class="dot" style="color:#4A9EFF;background:#4A9EFF"></span><span class="acct-name">Sam</span></div>
+              <span class="acct-mail">poplovitch.samuel@gmail.com</span>
+            </div>
+            <div class="chead colsep">
+              <div class="row1"><span class="dot" style="color:#B084F5;background:#B084F5"></span><span class="acct-name">Work</span></div>
+              <span class="acct-mail">sam@legal-innovators.com</span>
+            </div>
+
+            <!-- 5-Hour row -->
+            <div class="rlabel"><span class="r-t">5-Hour</span><span class="r-s">session</span></div>
+            <div>
+              <div class="cell">
+                <div class="top"><span class="cval low num">1%</span><span class="creset reset">4h 33m</span></div>
+                <div class="bar"><i class="bg-low" style="width:1%"></i></div>
+              </div>
+            </div>
+            <div class="colsep">
+              <div class="cell leader">
+                <div class="top"><span class="cval crit num">100%</span><span class="flag">peak</span></div>
+                <div class="bar"><i class="bg-crit" style="width:100%"></i></div>
+                <div class="creset reset"><span class="lbl">resets</span> 38m</div>
+              </div>
+            </div>
+
+            <!-- 7-Day row -->
+            <div class="rlabel"><span class="r-t">7-Day</span><span class="r-s">weekly</span></div>
+            <div class="colsep" style="border-left:0">
+              <div class="cell leader">
+                <div class="top"><span class="cval mid num">64%</span><span class="flag">peak</span></div>
+                <div class="bar"><i class="bg-mid" style="width:64%"></i></div>
+                <div class="creset reset"><span class="lbl">resets</span> 5d 13h</div>
+              </div>
+            </div>
+            <div class="colsep">
+              <div class="cell">
+                <div class="top"><span class="cval mid num">50%</span><span class="creset reset">4d 18h</span></div>
+                <div class="bar"><i class="bg-mid" style="width:50%"></i></div>
+              </div>
+            </div>
+
+            <!-- Fable row -->
+            <div class="rlabel"><span class="r-t">Fable</span><span class="r-s">model · wk</span></div>
+            <div>
+              <div class="cell leader">
+                <div class="top"><span class="cval crit num">100%</span><span class="flag">peak</span></div>
+                <div class="bar"><i class="bg-crit" style="width:100%"></i></div>
+                <div class="creset reset"><span class="lbl">resets</span> 5d 13h</div>
+              </div>
+            </div>
+            <div class="colsep">
+              <div class="cell">
+                <div class="top"><span class="cval mid num">73%</span><span class="creset reset">5d 1h</span></div>
+                <div class="bar"><i class="bg-mid" style="width:73%"></i></div>
+              </div>
+            </div>
+
+            <!-- trend row -->
+            <div class="rlabel"><span class="r-t">Trend</span><span class="r-s">24h</span></div>
+            <div class="trendrow">
+              <svg viewBox="0 0 200 26" preserveAspectRatio="none" aria-hidden="true">
+                <polyline points="0,20 28,19 56,18 84,19 112,8 140,7 168,8 200,7" fill="none" stroke="#4A9EFF" stroke-width="1.5"/>
+                <circle cx="200" cy="7" r="2.2" fill="#4A9EFF"/>
+              </svg>
+              <div class="foot-fresh" style="margin-top:6px"><span class="fresh">● just now</span></div>
+            </div>
+            <div class="trendrow colsep">
+              <svg viewBox="0 0 200 26" preserveAspectRatio="none" aria-hidden="true">
+                <polyline points="0,11 28,9 56,10 84,6 112,5 140,4 168,4 200,3" fill="none" stroke="#B084F5" stroke-width="1.5"/>
+                <circle cx="200" cy="3" r="2.2" fill="#B084F5"/>
+              </svg>
+              <div class="foot-fresh" style="margin-top:6px"><span class="refresh-pill">↻ Stale · 7h ago</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="pop-foot">＋ Add current account</div>
+      </div>
+
+      <div class="notes">
+        <h4>UX upgrades</h4>
+        <ul>
+          <li><span class="tick">✓</span><span><b>One glance per stat.</b> Each metric is a single row — the highest account is marked <b>peak</b> with an accent rail, so contention is obvious.</span></li>
+          <li><span class="tick">✓</span><span><b>Denser, calmer.</b> Percent + bar + reset collapse into one compact cell; the whole popover stays shorter than today's single account.</span></li>
+          <li><span class="tick">✓</span><span><b>Scales to 3+.</b> New accounts add columns; rows stay fixed, so the mental model never changes.</span></li>
+        </ul>
+      </div>
+    </section>
+  </div>
+
+  <div class="legend" aria-label="Severity colors">
+    <span><i class="bg-low"></i> Comfortable &lt;50%</span>
+    <span><i class="bg-mid"></i> Watch 50–74%</span>
+    <span><i class="bg-high"></i> High 75–89%</span>
+    <span><i class="bg-crit"></i> Critical 90%+</span>
+  </div>
+
+  <div class="verdict">
+    <h3>My recommendation</h3>
+    <p><b>Option B (matrix)</b> is the truer answer to "compare stats between accounts" — a row is one metric, so your eye never hunts. <b>Option A (columns)</b> is a gentler, lower-risk change and keeps each account's sparkline prominent. Both need a <b>wider popover</b> (~560pt for two accounts; it grows per account) — a real constraint on a menu-bar window worth deciding on. Tell me which direction (or a hybrid: matrix stats + per-account sparkline strip) and I'll refine this mockup before touching any SwiftUI.</p>
+  </div>
+</div>
+
+<script>
+  const root = document.documentElement;
+  document.querySelectorAll("[data-theme-btn]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const t = btn.getAttribute("data-theme-btn");
+      root.setAttribute("data-theme", t);
+      document.querySelectorAll("[data-theme-btn]").forEach(b =>
+        b.setAttribute("aria-pressed", String(b === btn)));
+    });
+  });
+  // segmented + edit controls are illustrative; keep them from jumping the page
+  document.querySelectorAll(".seg").forEach(seg => {
+    seg.addEventListener("click", e => {
+      const b = e.target.closest("button"); if (!b) return;
+      seg.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+    });
+  });
+</script>

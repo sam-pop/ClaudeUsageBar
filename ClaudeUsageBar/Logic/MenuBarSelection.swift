@@ -23,9 +23,11 @@ enum MenuBarSelection {
 
         let useFiveHour: Bool
         switch mode {
-        case .fiveHour: useFiveHour = true
-        case .sevenDay: useFiveHour = false
-        case .auto:     useFiveHour = fiveHour >= sevenDay
+        case .fiveHour:      useFiveHour = true
+        case .sevenDay:      useFiveHour = false
+        // `.bars` shows both windows and doesn't use this selection; fall back to the
+        // auto rule so any text path (e.g. accessibility) still resolves a sensible window.
+        case .auto, .bars:   useFiveHour = fiveHour >= sevenDay
         }
 
         return useFiveHour

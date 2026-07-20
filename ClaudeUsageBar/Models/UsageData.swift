@@ -162,12 +162,16 @@ enum MenuBarDisplayMode: String, Codable, CaseIterable {
     case auto = "auto"
     case fiveHour = "5h"
     case sevenDay = "7d"
+    /// Compact stacked 5h/7d mini-bars (+percent) per account. Shows both windows at once,
+    /// so it isn't a single-window selection like the others.
+    case bars = "bars"
 
     var label: String {
         switch self {
         case .auto: return "Auto"
         case .fiveHour: return "5h"
         case .sevenDay: return "7d"
+        case .bars: return "Bars"
         }
     }
 }
