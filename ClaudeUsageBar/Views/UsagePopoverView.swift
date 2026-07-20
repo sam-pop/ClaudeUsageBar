@@ -10,17 +10,14 @@ struct UsagePopoverView: View {
 
             if viewModel.accounts.isEmpty {
                 emptyState
+            } else if viewModel.accounts.count <= 3 {
+                // Let the MenuBarExtra window size to the content, like the original popover.
+                // A ScrollView has no ideal height and would collapse to zero in a
+                // self-sizing window — only use one (with a definite height) when there are
+                // enough accounts to actually need scrolling.
+                accountsList
             } else {
-                ScrollView {
-                    VStack(spacing: 14) {
-                        ForEach(viewModel.accountViews) { view in
-                            AccountRowView(viewModel: viewModel, accountView: view)
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
-                }
-                .frame(maxHeight: 460)
+                ScrollView { accountsList }.frame(height: 520)
             }
 
             addAccountControls
@@ -28,6 +25,16 @@ struct UsagePopoverView: View {
             footer.padding(.horizontal, 16).padding(.vertical, 10)
         }
         .frame(width: 320)
+    }
+
+    private var accountsList: some View {
+        VStack(spacing: 14) {
+            ForEach(viewModel.accountViews) { view in
+                AccountRowView(viewModel: viewModel, accountView: view)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
     }
 
     // MARK: - Header

@@ -49,18 +49,22 @@ enum MenuBarImage {
             for: accounts.map(\.label),
             overrides: accounts.map(\.shortCode)
         )
-        struct Segment { let dotColor: NSColor?; let text: String }
+        struct Segment { let dotColor: NSColor?; let text: String; let tag: String? }
         let segments: [Segment] = zip(prefixes, accounts).map { prefix, account in
             if let snapshot = snapshots[account.id],
                let active = MenuBarSelection.active(mode: mode, snapshot: snapshot) {
-                return Segment(dotColor: levelColor(active.percent), text: "\(prefix) \(active.percent)%")
+                let tag = MultiAccountMenuBar.windowTag(mode: mode, window: active.window)
+                return Segment(dotColor: levelColor(active.percent), text: "\(prefix) \(active.percent)%", tag: tag)
             }
-            return Segment(dotColor: nil, text: "\(prefix) --%")
+            return Segment(dotColor: nil, text: "\(prefix) --%", tag: nil)
         }
 
         let font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        let tagFont = NSFont.systemFont(ofSize: 8, weight: .semibold)
         let textAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.labelColor]
+        let tagAttrs: [NSAttributedString.Key: Any] = [.font: tagFont, .foregroundColor: NSColor.secondaryLabelColor]
         let sepAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.tertiaryLabelColor]
+        let tagGap: CGFloat = 2
 
         let dotDiameter: CGFloat = 7
         let dotGap: CGFloat = 3
@@ -74,6 +78,9 @@ enum MenuBarImage {
             if index > 0 { width += sep.size().width + segGap * 2 }
             if segment.dotColor != nil { width += dotDiameter + dotGap }
             width += NSAttributedString(string: segment.text, attributes: textAttrs).size().width
+            if let tag = segment.tag {
+                width += tagGap + NSAttributedString(string: tag, attributes: tagAttrs).size().width
+            }
         }
         width = ceil(width) + 2
 
@@ -96,6 +103,14 @@ enum MenuBarImage {
                 let strSize = str.size()
                 str.draw(at: NSPoint(x: x, y: (height - strSize.height) / 2))
                 x += strSize.width
+                // Auto-mode window tag ("5h"/"7d"), drawn slightly raised and smaller.
+                if let tag = segment.tag {
+                    x += tagGap
+                    let tagStr = NSAttributedString(string: tag, attributes: tagAttrs)
+                    let tagSize = tagStr.size()
+                    tagStr.draw(at: NSPoint(x: x, y: (height - tagSize.height) / 2 + 3))
+                    x += tagSize.width
+                }
             }
             return true
         }

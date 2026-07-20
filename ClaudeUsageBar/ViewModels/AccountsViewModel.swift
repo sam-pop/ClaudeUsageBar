@@ -23,6 +23,7 @@ final class AccountsViewModel: ObservableObject {
     }
 
     private var runtimes: [UUID: AccountRuntime] = [:]
+    private var identityBackfillInFlight: Set<UUID> = []
     private let accountsStore: AccountsStore
     private let credentialStore: AccountCredentialStoring
     private let credentials: AccountCredentialManager
@@ -153,6 +154,32 @@ final class AccountsViewModel: ObservableObject {
         snapshots[id] = runtime.snapshot
         runtimeStates[id] = runtime.state
         needsReAuth[id] = runtime.needsReAuth
+
+        // A migrated account starts with no identity (migration is offline). Backfill it
+        // from the profile endpoint on its first successful refresh — the token is known
+        // good then — so it can be deduped against accounts added later.
+        if runtime.snapshot != nil,
+           let account = accounts.first(where: { $0.id == id }),
+           account.accountUUID == nil,
+           !identityBackfillInFlight.contains(id) {
+            identityBackfillInFlight.insert(id)
+            Task { [weak self] in await self?.backfillIdentity(id) }
+        }
+    }
+
+    private func backfillIdentity(_ id: UUID) async {
+        defer { identityBackfillInFlight.remove(id) }
+        guard let token = try? credentials.credentials(for: id)?.accessToken,
+              let identity = try? await ProfileService.fetchIdentity(token: token) else { return }
+
+        let result = AccountIdentityResolver.backfill(accounts, id: id,
+                                                      uuid: identity.uuid, email: identity.email)
+        accounts = result.accounts
+        accountsStore.save(accounts)
+        if let dupLabel = result.duplicateOfLabel,
+           let account = accounts.first(where: { $0.id == id }) {
+            addAccountError = "“\(account.label)” looks like the same account as “\(dupLabel)”. You can remove one."
+        }
     }
 
     // MARK: - Account operations

@@ -20,6 +20,9 @@ struct AccountRowView: View {
 
             if let snapshot = accountView.snapshot {
                 usageSections(snapshot)
+                if let limits = snapshot.modelLimits, !limits.isEmpty {
+                    modelLimitsSection(limits)
+                }
                 if accountView.history.count >= 2 { sparkline }
                 updatedLine(snapshot.fetchedAt)
             } else if case .error(let message) = accountView.state {
@@ -86,6 +89,29 @@ struct AccountRowView: View {
             UsageSectionView(title: "7-Day Window", percent: snapshot.sevenDayPercent,
                              resetsAt: snapshot.sevenDayResetsAt)
         }
+    }
+
+    private func modelLimitsSection(_ limits: [ModelLimit]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Per-model (weekly)")
+                .font(.caption2).fontWeight(.medium).foregroundStyle(.secondary)
+            ForEach(limits) { limit in
+                HStack(spacing: 6) {
+                    Text(limit.modelName).font(.caption).lineLimit(1)
+                    Spacer()
+                    if let resetsAt = limit.resetsAt {
+                        Text("resets \(UsageFormatting.resetCountdown(until: resetsAt))")
+                            .font(.caption2).foregroundStyle(.tertiary)
+                    }
+                    Text("\(limit.percent)%")
+                        .font(.system(.caption, design: .rounded, weight: .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(limit.severity == "critical" ? .red : UsageColor.level(limit.percent))
+                }
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.04)))
     }
 
     private var sparkline: some View {

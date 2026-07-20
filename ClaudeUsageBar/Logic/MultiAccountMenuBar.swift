@@ -65,4 +65,13 @@ enum MultiAccountMenuBar {
     static func worstPercent(_ percents: [Int]) -> Int? {
         percents.max()
     }
+
+    /// The per-account window tag ("5h"/"7d") to show beside each percent. Only meaningful
+    /// in **auto** mode, where each account independently picks its higher window and the
+    /// bare numbers would otherwise be incomparable. In an explicit 5h/7d mode every account
+    /// shows the same window, so no per-account tag is needed (`nil`).
+    static func windowTag(mode: MenuBarDisplayMode, window: MenuBarDisplayMode) -> String? {
+        guard mode == .auto else { return nil }
+        return window == .fiveHour ? "5h" : "7d"
+    }
 }
