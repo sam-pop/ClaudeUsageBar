@@ -61,6 +61,13 @@ enum KeychainService {
         return creds
     }
 
+    /// Reads whichever account Claude Code is currently logged into, WITHOUT persisting to
+    /// any app store. The multi-account capture/re-read paths own persistence themselves
+    /// (per-account slot), so they use this rather than `refreshFromKeychain`. May prompt.
+    static func captureFromClaudeCode() -> CachedCredentials? {
+        readKeychainCredentials()
+    }
+
     /// Force re-read from Claude Code's keychain item. Triggers a password prompt.
     /// Should only be called from a user-initiated action (e.g., a Refresh button).
     static func refreshFromKeychain() -> CachedCredentials? {
@@ -77,6 +84,16 @@ enum KeychainService {
     /// to the app-owned store. On failure throws — caller should fall back to the
     /// user-controlled refresh path.
     static func refreshAccessToken(using refreshToken: String) async throws -> CachedCredentials {
+        let newCreds = try await performOAuthRefresh(refreshToken: refreshToken)
+        store.save(newCreds)
+        return newCreds
+    }
+
+    /// The bare OAuth refresh-token exchange: POSTs to the token endpoint and returns the
+    /// new credentials WITHOUT persisting them. The multi-account path uses this and lets
+    /// the per-account store own persistence; `refreshAccessToken` wraps it for the legacy
+    /// single-store path.
+    static func performOAuthRefresh(refreshToken: String) async throws -> CachedCredentials {
         var request = URLRequest(url: oauthTokenURL)
         request.httpMethod = "POST"
         request.timeoutInterval = 10
@@ -105,13 +122,11 @@ enum KeychainService {
         }
         let decoded = try JSONDecoder().decode(RefreshResponse.self, from: data)
 
-        let newCreds = CachedCredentials(
+        return CachedCredentials(
             accessToken: decoded.access_token,
             refreshToken: decoded.refresh_token ?? refreshToken,
             expiresAt: decoded.expires_in.map { Date().addingTimeInterval(TimeInterval($0)) }
         )
-        store.save(newCreds)
-        return newCreds
     }
 
     // MARK: - Legacy plaintext-file migration (one-shot, read-only)

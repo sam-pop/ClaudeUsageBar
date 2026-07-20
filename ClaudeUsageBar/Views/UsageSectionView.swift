@@ -6,7 +6,7 @@ struct UsageSectionView: View {
     let resetsAt: Date?
 
     private var color: Color {
-        UsageViewModel.color(for: percent)
+        UsageColor.level(percent)
     }
 
     var body: some View {
@@ -32,7 +32,7 @@ struct UsageSectionView: View {
                     Text("Resets in")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
-                    Text(UsageViewModel.liveCountdown(until: resetsAt))
+                    Text(UsageFormatting.liveCountdown(until: resetsAt))
                         .font(.system(.caption, design: .monospaced, weight: .medium))
                         .foregroundStyle(.secondary)
                 }

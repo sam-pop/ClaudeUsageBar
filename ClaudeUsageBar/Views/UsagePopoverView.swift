@@ -1,214 +1,104 @@
 import SwiftUI
 
 struct UsagePopoverView: View {
-    @ObservedObject var viewModel: UsageViewModel
+    @ObservedObject var viewModel: AccountsViewModel
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header
-            HStack {
-                Image(systemName: "sparkle")
-                    .foregroundStyle(.orange)
-                Text("Claude Usage")
-                    .font(.system(.headline, weight: .semibold))
-                Spacer()
-                if case .loading = viewModel.state {
-                    ProgressView()
-                        .scaleEffect(0.6)
-                        .frame(width: 16, height: 16)
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 14)
-            .padding(.bottom, 10)
-
+            header
             Divider()
 
-            // Content
-            Group {
-                switch viewModel.state {
-                case .idle:
-                    loadingPlaceholder
-                case .loading:
-                    if let s = viewModel.snapshot {
-                        usageSections(s)
-                    } else {
-                        loadingPlaceholder
-                    }
-                case .loaded(let snapshot):
-                    usageSections(snapshot)
-                case .error(let message):
-                    if let s = viewModel.snapshot {
-                        usageSections(s)
-                        errorBanner(message)
-                    } else {
-                        errorView(message)
-                    }
-                }
+            if viewModel.accounts.isEmpty {
+                emptyState
+            } else if viewModel.accounts.count <= 3 {
+                // Let the MenuBarExtra window size to the content, like the original popover.
+                // A ScrollView has no ideal height and would collapse to zero in a
+                // self-sizing window — only use one (with a definite height) when there are
+                // enough accounts to actually need scrolling.
+                accountsList
+            } else {
+                ScrollView { accountsList }.frame(height: 520)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
 
+            addAccountControls
             Divider()
-
-            // Footer
-            footer
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
+            footer.padding(.horizontal, 16).padding(.vertical, 10)
         }
-        .frame(width: 300)
+        .frame(width: 320)
     }
 
-    // MARK: - Subviews
-
-    private func usageSections(_ snapshot: UsageSnapshot) -> some View {
-        VStack(spacing: 12) {
-            UsageSectionView(
-                title: "5-Hour Window",
-                percent: snapshot.fiveHourPercent,
-                resetsAt: snapshot.fiveHourResetsAt
-            )
-            UsageSectionView(
-                title: "7-Day Window",
-                percent: snapshot.sevenDayPercent,
-                resetsAt: snapshot.sevenDayResetsAt
-            )
-
-            // Sparkline (24h trend)
-            if viewModel.usageHistory.count >= 2 {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 8) {
-                        Label("5hr", systemImage: "circle.fill")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.blue)
-                        Label("7day", systemImage: "circle.fill")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.orange)
-                        Spacer()
-                        Text("\(viewModel.usageHistory.count) samples")
-                            .font(.system(size: 8, design: .monospaced))
-                            .foregroundStyle(.quaternary)
-                    }
-                    SparklineView(dataPoints: viewModel.usageHistory)
-                }
-                .padding(10)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color.primary.opacity(0.04))
-                )
-            }
-
-            if let fetchedAt = viewModel.snapshot?.fetchedAt {
-                TimelineView(.periodic(from: .now, by: 30)) { _ in
-                    HStack(spacing: 4) {
-                        Text("Updated \(UsageViewModel.lastUpdatedText(since: fetchedAt))")
-                        if viewModel.isStaleData {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.yellow)
-                        }
-                    }
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                }
+    private var accountsList: some View {
+        VStack(spacing: 14) {
+            ForEach(viewModel.accountViews) { view in
+                AccountRowView(viewModel: viewModel, accountView: view)
             }
         }
-    }
-
-    private var loadingPlaceholder: some View {
-        VStack(spacing: 8) {
-            ProgressView()
-            Text("Loading usage data...")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 20)
-    }
-
-    private func errorBanner(_ message: String) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 10))
-                .foregroundStyle(.orange)
-            Text(message)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-            Spacer(minLength: 4)
-            if viewModel.needsManualRefresh {
-                refreshTokenButton(compact: true)
-            }
-        }
-        .padding(8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(Color.orange.opacity(0.08))
-        )
-    }
-
-    private func errorView(_ message: String) -> some View {
-        VStack(spacing: 10) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(.title2)
-                .foregroundStyle(.orange)
-            Text(message)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-            if viewModel.needsManualRefresh {
-                refreshTokenButton(compact: false)
-            }
-        }
-        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 16)
         .padding(.vertical, 12)
     }
 
-    private func refreshTokenButton(compact: Bool) -> some View {
-        Button {
-            Task { await viewModel.refreshFromKeychain() }
-        } label: {
-            Label("Refresh token", systemImage: "key.fill")
-                .font(.system(size: compact ? 10 : 12, weight: .medium))
+    // MARK: - Header
+
+    private var header: some View {
+        HStack {
+            Image(systemName: "sparkle").foregroundStyle(.orange)
+            Text("Claude Usage").font(.system(.headline, weight: .semibold))
+            Spacer()
         }
-        .buttonStyle(.borderedProminent)
-        .controlSize(compact ? .mini : .small)
-        .help("Re-read OAuth token from Claude Code's keychain (may prompt for password)")
+        .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 10)
     }
+
+    private var emptyState: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "person.crop.circle.badge.plus")
+                .font(.title2).foregroundStyle(.secondary)
+            Text("No accounts yet").font(.callout).fontWeight(.medium)
+            Text("Log into Claude Code, then add the current account below.")
+                .font(.caption).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity).padding(.vertical, 20).padding(.horizontal, 16)
+    }
+
+    private var addAccountControls: some View {
+        VStack(spacing: 4) {
+            Button {
+                Task { await viewModel.addCurrentAccount() }
+            } label: {
+                Label("Add current account", systemImage: "plus.circle")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(maxWidth: .infinity)
+            }
+            .controlSize(.small)
+            .help("Captures whichever account Claude Code is currently logged into")
+
+            if let error = viewModel.addAccountError {
+                Text(error).font(.caption2).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center).lineLimit(3)
+            } else {
+                Text("Tip: switch Claude Code's login first to add a different account.")
+                    .font(.caption2).foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 8)
+    }
+
+    // MARK: - Footer
 
     private var footer: some View {
         VStack(spacing: 8) {
             HStack(spacing: 2) {
-                Text("Bar:")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                Text("Bar:").font(.caption2).foregroundStyle(.secondary)
                 Picker("", selection: $viewModel.menuBarDisplayMode) {
-                    ForEach(MenuBarDisplayMode.allCases, id: \.self) { mode in
-                        Text(mode.label).tag(mode)
-                    }
+                    ForEach(MenuBarDisplayMode.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
-                .pickerStyle(.segmented)
-                .fixedSize()
-
+                .pickerStyle(.segmented).fixedSize()
                 Spacer()
-
                 Toggle("Launch at login", isOn: Binding(
                     get: { viewModel.launchAtLogin },
                     set: { _ in viewModel.toggleLaunchAtLogin() }
                 ))
-                .toggleStyle(.switch)
-                .controlSize(.mini)
-                .font(.caption2)
-            }
-
-            if let error = viewModel.launchAtLoginError {
-                Text(error)
-                    .font(.caption2)
-                    .foregroundStyle(.red)
-                    .lineLimit(2)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
+                .toggleStyle(.switch).controlSize(.mini).font(.caption2)
             }
 
             if viewModel.notificationsAuthorized == false {
@@ -219,34 +109,25 @@ struct UsagePopoverView: View {
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "bell.slash")
-                        Text("Notifications off — enable in System Settings")
-                            .lineLimit(1)
+                        Text("Notifications off — enable in System Settings").lineLimit(1)
                         Spacer(minLength: 0)
                     }
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .font(.caption2).foregroundStyle(.secondary)
                 }
                 .buttonStyle(.borderless)
             }
 
             HStack {
                 Button {
-                    Task { await viewModel.refresh() }
+                    Task { await viewModel.refreshAll() }
                 } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 12, weight: .medium))
+                    Image(systemName: "arrow.clockwise").font(.system(size: 12, weight: .medium))
                 }
-                .buttonStyle(.borderless)
-                .help("Refresh now")
-
+                .buttonStyle(.borderless).help("Refresh all now")
                 Spacer()
-
-                Button("Quit") {
-                    NSApplication.shared.terminate(nil)
-                }
-                .buttonStyle(.borderless)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.secondary)
+                Button("Quit") { NSApplication.shared.terminate(nil) }
+                    .buttonStyle(.borderless).font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
             }
         }
     }

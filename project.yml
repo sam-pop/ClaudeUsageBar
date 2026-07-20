@@ -21,7 +21,7 @@ targets:
         CODE_SIGN_ENTITLEMENTS: ClaudeUsageBar/ClaudeUsageBar.entitlements
         CODE_SIGN_IDENTITY: "-"
         PRODUCT_BUNDLE_IDENTIFIER: com.sam.ClaudeUsageBar
-        MARKETING_VERSION: "1.2.0"
+        MARKETING_VERSION: "1.3.0"
         CURRENT_PROJECT_VERSION: "1"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
   ClaudeUsageBarTests:
