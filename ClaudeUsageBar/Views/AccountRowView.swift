@@ -1,0 +1,127 @@
+import SwiftUI
+
+/// One account's block in the popover: an editable header (label + menu-bar short code,
+/// remove) plus its 5-hour / 7-day usage, sparkline, and last-updated line.
+struct AccountRowView: View {
+    @ObservedObject var viewModel: AccountsViewModel
+    let accountView: AccountsViewModel.AccountView
+
+    @State private var isEditing = false
+    @State private var draftLabel = ""
+    @State private var draftShortCode = ""
+
+    private var account: Account { accountView.account }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            headerRow
+
+            if isEditing { editor }
+
+            if let snapshot = accountView.snapshot {
+                usageSections(snapshot)
+                if accountView.history.count >= 2 { sparkline }
+                updatedLine(snapshot.fetchedAt)
+            } else if case .error(let message) = accountView.state {
+                errorBanner(message)
+            } else {
+                ProgressView().controlSize(.small).frame(maxWidth: .infinity)
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.04)))
+    }
+
+    // MARK: - Header
+
+    private var headerRow: some View {
+        HStack(spacing: 6) {
+            Text(account.label).font(.system(.subheadline, weight: .semibold)).lineLimit(1)
+            if let email = account.email, email != account.label {
+                Text(email).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+            }
+            Spacer()
+            Button {
+                draftLabel = account.label
+                draftShortCode = account.shortCode ?? ""
+                isEditing.toggle()
+            } label: { Image(systemName: "pencil").font(.system(size: 10)) }
+                .buttonStyle(.borderless).help("Rename / set menu-bar code")
+            Button(role: .destructive) {
+                viewModel.remove(account.id)
+            } label: { Image(systemName: "trash").font(.system(size: 10)) }
+                .buttonStyle(.borderless).help("Remove this account")
+        }
+    }
+
+    private var editor: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 6) {
+                TextField("Label", text: $draftLabel)
+                    .textFieldStyle(.roundedBorder).controlSize(.small)
+                TextField("Bar", text: $draftShortCode)
+                    .textFieldStyle(.roundedBorder).controlSize(.small).frame(width: 44)
+                    .help("Menu-bar prefix (e.g. P, W, 🏠). Blank = auto from the label.")
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { isEditing = false }.controlSize(.mini)
+                Button("Save") {
+                    let trimmed = draftLabel.trimmingCharacters(in: .whitespaces)
+                    if !trimmed.isEmpty { viewModel.relabel(account.id, to: trimmed) }
+                    viewModel.setShortCode(account.id, to: draftShortCode)
+                    isEditing = false
+                }
+                .controlSize(.mini).buttonStyle(.borderedProminent)
+            }
+        }
+    }
+
+    // MARK: - Usage
+
+    private func usageSections(_ snapshot: UsageSnapshot) -> some View {
+        VStack(spacing: 10) {
+            UsageSectionView(title: "5-Hour Window", percent: snapshot.fiveHourPercent,
+                             resetsAt: snapshot.fiveHourResetsAt)
+            UsageSectionView(title: "7-Day Window", percent: snapshot.sevenDayPercent,
+                             resetsAt: snapshot.sevenDayResetsAt)
+        }
+    }
+
+    private var sparkline: some View {
+        SparklineView(dataPoints: accountView.history)
+            .frame(height: 32)
+    }
+
+    private func updatedLine(_ fetchedAt: Date) -> some View {
+        TimelineView(.periodic(from: .now, by: 30)) { _ in
+            Text("Updated \(UsageFormatting.lastUpdatedText(since: fetchedAt))")
+                .font(.caption2).foregroundStyle(.tertiary)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+    }
+
+    private func errorBanner(_ message: String) -> some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 10)).foregroundStyle(.orange)
+                Text(message).font(.caption2).foregroundStyle(.secondary).lineLimit(3)
+                Spacer(minLength: 4)
+            }
+            if viewModel.needsReAuth[account.id] == true {
+                Button {
+                    Task { await viewModel.rereadFromClaudeCode(account.id) }
+                } label: {
+                    Label("Re-read from Claude Code", systemImage: "key.fill")
+                        .font(.system(size: 10, weight: .medium))
+                }
+                .controlSize(.mini).buttonStyle(.borderedProminent)
+                .help("Make sure Claude Code is logged into THIS account first")
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.opacity(0.08)))
+    }
+}

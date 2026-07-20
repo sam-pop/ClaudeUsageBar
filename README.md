@@ -13,13 +13,16 @@ ClaudeUsageBar sits in your menu bar showing a usage window and its reset countd
 
 It reuses the OAuth credentials that Claude Code stores in the macOS Keychain and calls the Anthropic usage API directly — Claude Code doesn't need to be running.
 
+**Multiple accounts.** Track more than one Claude account at once (e.g. personal + work). Each account refreshes independently, so once added they all stay live without switching Claude Code's login. With one account the menu bar is unchanged; with two or more it shows a compact per-account summary like `P 45% · W 82%`, with a full breakdown per account in the popover. See [Multiple accounts](#multiple-accounts).
+
 **Key features:**
 
-- Color-coded sparkle icon (green / yellow / red) based on usage level
+- Track one or more Claude accounts, each refreshing independently
+- Compact multi-account menu bar (`P 45% · W 82%`) with editable per-account prefixes
+- Color-coded (green / yellow / red) by usage level
 - Live reset countdowns that tick every second
 - Menu-bar display modes — **Auto** (whichever window is higher), **5h**, or **7d**
-- Adaptive refresh rate — faster polling when usage is high
-- Per-window system notifications at configurable thresholds (default 80% and 90%)
+- Per-account, per-window system notifications at configurable thresholds (default 80% and 90%)
 - Proactive token refresh before expiry, with a reactive 401/403 fallback
 - Exponential backoff on transient network errors
 - Persistent state — instant data on relaunch, no loading spinner
@@ -43,6 +46,20 @@ Or just `make run` to build and launch without installing.
 3. **Allow notifications** — for usage threshold alerts
 4. Click the menu bar icon for the full breakdown
 
+## Multiple accounts
+
+The first account is picked up automatically from whatever Claude Code is logged into. To add another:
+
+1. In **Claude Code**, log into the second account (e.g. `claude /login`).
+2. Open the popover and click **Add current account**.
+3. That's it — the app captures the account and, from then on, refreshes it independently. You can switch Claude Code back to your first account; both keep updating.
+
+Each account is identified by its Anthropic account ID (fetched from the OAuth profile endpoint), so the app auto-labels it, **won't add the same account twice**, and — if a token ever needs re-reading — verifies Claude Code is logged into the *right* account before overwriting anything.
+
+In the popover, each account has a **✎** to rename it and set a custom **menu-bar prefix** (the `P` / `W` letters — override with anything, e.g. `Me` or `🏠`), and a **🗑** to remove it. Prefixes are auto-derived from labels and de-duplicated when they'd collide.
+
+**Note on the menu bar with 2+ accounts:** the bar shows each account's percentage but drops the reset countdown to stay compact — open the popover for full countdowns, progress bars, and sparklines per account.
+
 | Target | Description |
 |--------|-------------|
 | `make build` | Build Release binary |
@@ -64,42 +81,47 @@ Or just `make run` to build and launch without installing.
 ## How It Works
 
 ```
-Claude Code Keychain item ─┐
-(one-time read/migration)  │
-                           ▼
-              KeychainService ──▶ App-owned Keychain item
-                           ▲       "com.sam.ClaudeUsageBar"
-      proactive + reactive │       (no-prompt reads, encrypted at rest)
-        OAuth token refresh │
-                           ▼
-Anthropic API ◀── UsageAPIService (exponential backoff) ──▶ UsageViewModel
-  GET /oauth/usage    │                                       │ adaptive timer
-  {five_hour,         │                                       │ per-window alerts
-   seven_day}         │                                       │ persistence
-                      │                                       ▼
-                      │                                 MenuBarExtra
-                      │                                 ✦ 42% · 2h 15m
-                      └─────────────────────────────── [Popover + sparkline]
+Claude Code Keychain item ──▶ captured per account (Add current account)
+(current login)                     │
+                                    ▼
+              AccountCredentialManager ──▶ one app-owned Keychain item
+                                    ▲       "com.sam.ClaudeUsageBar"
+              per-account, atomic   │       payload = { accountID: credentials }
+              read-modify-write     │       (no-prompt reads, encrypted at rest)
+                                    ▼
+              AccountsViewModel (coordinator)
+                 owns one AccountRuntime per account
+                    │            │
+   independent OAuth │            │ Anthropic API
+   token refresh ────┘            ├─ GET /api/oauth/profile  (identity: uuid/email)
+   (per account)                  └─ GET /oauth/usage        ({five_hour, seven_day})
+                                    │
+                                    ▼
+                              MenuBarExtra
+                       1 account:  ✦ 42% · 2h 15m   (unchanged)
+                       2+ accounts: ● P 45% · ● W 82%
+                              [Popover: one section per account + sparklines]
 ```
 
-**Credential storage.** On first run the app reads Claude Code's Keychain item once, then copies the OAuth credentials into its **own** Keychain item (`com.sam.ClaudeUsageBar`). Subsequent reads hit that app-owned item, so there are no recurring password prompts. Any legacy plaintext cache from earlier builds (`~/Library/Application Support/ClaudeUsageBar/.credentials.json`) is migrated into the Keychain and deleted the first time it's seen.
+**Credential storage.** All accounts' credentials live in a **single** app-owned Keychain item (`com.sam.ClaudeUsageBar`) whose payload is a JSON map keyed by account ID. One Keychain item means one access-control entry (not one per account) and no orphaned items. Writes are done as a verified read-modify-write of a single slot, and a present-but-unreadable item (e.g. after a code-signature change) is never overwritten — so a locked or ACL-broken Keychain can't wipe your other accounts. On upgrade from an older single-account build, the existing credentials are migrated into this map (and the legacy item/plaintext cache deleted) only **after** the new copy is verified to have persisted.
 
-**Token refresh.** The access token is refreshed **proactively** shortly before it expires using the stored refresh token (no Keychain access needed). A **reactive** refresh on a 401/403 stays in place as a safety net. Only an explicit "Refresh token" button re-reads Claude Code's Keychain item, which is the only path that may prompt for a password.
+**Token refresh.** Each account's access token is refreshed **proactively** before it expires using that account's own stored refresh token — no Keychain prompt, and no dependence on which account Claude Code is currently logged into. A **reactive** refresh on a 401/403 is the safety net. A per-account circuit breaker only trips on genuine token rejections (400/401/403); network blips, 429s, and 5xx don't count, so a flaky connection never strands an account. Re-reading from Claude Code (for a dead refresh token) is identity-guarded.
 
-**Resilience.** Transient failures (network errors, HTTP 5xx) are retried with exponential backoff (3 attempts, ~1s / 2s / 4s, jittered). Polling is adaptive: more frequent when usage is high, less frequent when it's low.
+**Resilience.** Transient failures (network errors, HTTP 5xx) are retried with exponential backoff (3 attempts, ~1s / 2s / 4s, jittered).
 
 ## Smart Features
 
 | Feature | Detail |
 |---------|--------|
-| **Adaptive refresh** | 30s when usage ≥ 75%, 60s normal, 120s when < 25% |
-| **Per-window notifications** | Separate alerts for the 5-hour and 7-day windows, e.g. "5-hour window at 82%" |
+| **Multiple accounts** | Track 1+ accounts, each refreshing independently; deduped by Anthropic account ID |
+| **Per-account, per-window notifications** | Separate alerts per account for the 5-hour and 7-day windows, e.g. "Work: 5-hour window at 82%" |
 | **Configurable thresholds** | Defaults to 80% and 90%; override via `defaults` (see below) |
-| **App-owned Keychain item** | Credentials cached in the app's own Keychain item — no recurring prompts, encrypted at rest |
-| **Proactive token refresh** | Renews the access token before expiry; reactive 401/403 refresh as fallback |
+| **Single-item Keychain store** | All accounts in one app-owned Keychain item; verified writes never clobber other accounts |
+| **Independent token refresh** | Each account refreshes proactively before expiry; reactive 401/403 fallback; breaker trips only on real rejections |
+| **Identity-guarded re-read** | Re-reading a dead login verifies Claude Code is on the right account first |
 | **Exponential backoff** | Retries transient errors with jittered backoff; auth errors take the refresh path |
-| **24h sparkline** | Samples every 5min, up to 288 points with time axis labels |
-| **Persistence** | Last known data + history saved to UserDefaults |
+| **24h sparkline** | Per account; samples every 5min, up to 288 points |
+| **Namespaced persistence** | Last data + history saved per account in UserDefaults |
 | **Graceful errors** | Shows stale data + error banner instead of a blank screen |
 
 ### Configuring notification thresholds
@@ -123,25 +145,39 @@ ClaudeUsageBar/
 │   ├── ClaudeUsageBarApp.swift    # @main entry point
 │   ├── AppInfo.swift              # Shared version / User-Agent helper
 │   ├── Models/
-│   │   └── UsageData.swift        # API response + snapshot + history
-│   ├── Logic/                     # Pure, unit-tested units
-│   │   ├── MenuBarSelection.swift # Which window the menu bar shows
-│   │   ├── ThresholdTracker.swift # Per-window threshold crossings + hysteresis
-│   │   ├── HistoryBuffer.swift    # 5-min sampling, 288-point cap
-│   │   └── RetryPolicy.swift      # Exponential-backoff calculator
+│   │   ├── UsageData.swift          # API response + snapshot + history
+│   │   ├── Account.swift            # Account identity + AccountsStore (accounts.v1)
+│   │   └── AccountPersistence.swift # Per-account snapshot/history (namespaced)
+│   ├── Logic/                       # Pure, unit-tested units
+│   │   ├── MenuBarSelection.swift   # Which window a single account shows
+│   │   ├── MenuBarPresentation.swift# Menu-bar text for 0/1/N accounts
+│   │   ├── MultiAccountMenuBar.swift# Prefix dedupe + compact composition
+│   │   ├── UsageFormatting.swift    # Countdown / "updated" formatters
+│   │   ├── ThresholdTracker.swift   # Per-window threshold crossings + hysteresis
+│   │   ├── HistoryBuffer.swift      # 5-min sampling, 288-point cap
+│   │   ├── RefreshCircuitBreaker.swift # Trip-on-rejection + timed re-arm
+│   │   ├── OAuthRefreshOutcome.swift   # Classifies refresh failures
+│   │   └── RetryPolicy.swift        # Exponential-backoff calculator
 │   ├── Services/
-│   │   ├── KeychainService.swift  # Credential load/migrate + OAuth refresh
-│   │   ├── CredentialStore.swift  # App-owned Keychain item
-│   │   └── UsageAPIService.swift  # API client + error classification
+│   │   ├── KeychainService.swift    # Claude Code capture + OAuth refresh + migration read
+│   │   ├── CredentialStore.swift    # (legacy single-item store, migration source)
+│   │   ├── AccountCredentialStore.swift # Single-item multi-account Keychain map + manager
+│   │   ├── AccountMigration.swift   # One-time single→multi migration (idempotent, safe)
+│   │   ├── ProfileService.swift     # GET /api/oauth/profile (account identity)
+│   │   └── UsageAPIService.swift    # Usage API client + error classification
 │   ├── ViewModels/
-│   │   └── UsageViewModel.swift   # State, timers, notifications
+│   │   ├── AccountsViewModel.swift  # Coordinator: accounts, timer, notifications, ops
+│   │   └── AccountRuntime.swift     # One account's refresh loop + state
 │   └── Views/
-│       ├── MenuBarLabel.swift     # Color-coded ✦ + percentage + countdown
-│       ├── ProgressBarView.swift  # Animated gradient bar with glow
-│       ├── SparklineView.swift    # 24h trend graph with time axis
-│       ├── UsageSectionView.swift # Card with bar + live countdown
-│       └── UsagePopoverView.swift # Full popover layout
-└── ClaudeUsageBarTests/           # Swift Testing unit tests
+│       ├── MenuBarLabel.swift       # 1-account (unchanged) / N-account label
+│       ├── MenuBarImage.swift       # AppKit drawing (badge + colored-dot summary)
+│       ├── ProgressBarView.swift    # Animated gradient bar with glow
+│       ├── SparklineView.swift      # 24h trend graph with time axis
+│       ├── UsageSectionView.swift   # Card with bar + live countdown
+│       ├── UsageColor.swift         # Level → SwiftUI color
+│       ├── AccountRowView.swift     # One account's popover block (+ edit/remove)
+│       └── UsagePopoverView.swift   # Full popover layout
+└── ClaudeUsageBarTests/             # Swift Testing unit tests
 ```
 
 ## Testing
@@ -159,8 +195,9 @@ CI runs the same build + test on every push and pull request (see the badge abov
 | Problem | Fix |
 |---------|-----|
 | "No OAuth token found" | Log into Claude Code once (`claude` → login flow) |
-| HTTP 403 | Re-login: `claude /login` for a fresh token with correct scopes, then use **Refresh token** in the popover |
-| One-time Keychain prompt after rebuilding from source | With ad-hoc signing (`CODE_SIGN_IDENTITY = "-"`), the app-owned Keychain item is bound to the previous build's code signature, so a freshly rebuilt binary may prompt once. The app self-heals: click **Always Allow** and it re-creates its item for the new build. |
+| An account shows an error / token expired | Make sure Claude Code is logged into **that** account, then click **Re-read from Claude Code** in its popover section (the re-read is identity-guarded and refuses a mismatched login) |
+| "Already tracked" when adding | That account is already added — switch Claude Code's login to the *other* account first, then **Add current account** |
+| Keychain prompt / an account needs re-adding after rebuilding from source | With ad-hoc signing (`CODE_SIGN_IDENTITY = "-"`), the app-owned Keychain item is bound to the previous build's code signature, so a rebuilt binary may not be able to read it. Re-capture the affected account via **Add current account** / **Re-read from Claude Code**. |
 | Repeated prompts while iterating locally | Sign with a stable, free **"Apple Development"** identity instead of ad-hoc signing so the item's ACL stays valid across rebuilds. |
 | No notifications | Check System Settings → Notifications → ClaudeUsageBar; the popover also shows a "Notifications off" shortcut when disabled |
 

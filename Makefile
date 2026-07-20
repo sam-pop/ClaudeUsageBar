@@ -13,6 +13,7 @@ run: build
 	open build/Release/ClaudeUsageBar.app
 
 install: build
+	-pkill -x ClaudeUsageBar || true
 	rm -rf /Applications/ClaudeUsageBar.app
 	cp -R build/Release/ClaudeUsageBar.app /Applications/
 	@echo "Installed to /Applications/ClaudeUsageBar.app"
