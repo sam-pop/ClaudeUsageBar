@@ -96,19 +96,22 @@ struct AccountRowView: View {
             Text("Per-model (weekly)")
                 .font(.caption).fontWeight(.medium).foregroundStyle(.secondary)
             ForEach(limits) { limit in
-                let color: Color = limit.severity == "critical" ? .red : UsageColor.level(limit.percent)
+                // Once a limit's reset has passed the window has rolled over to 0%, so drop
+                // the stale percent (and its "critical" red) rather than showing a stuck value.
+                let shown = UsageSnapshot.effectivePercent(limit.percent, resetsAt: limit.resetsAt)
+                let color: Color = (limit.severity == "critical" && shown > 0) ? .red : UsageColor.level(shown)
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(alignment: .firstTextBaseline) {
                         Text(limit.modelName)
                             .font(.system(.subheadline, weight: .semibold))
                             .lineLimit(1)
                         Spacer()
-                        Text("\(limit.percent)%")
+                        Text("\(shown)%")
                             .font(.system(.title3, design: .rounded, weight: .bold))
                             .monospacedDigit()
                             .foregroundStyle(color)
                     }
-                    ProgressBarView(percent: limit.percent, color: color)
+                    ProgressBarView(percent: shown, color: color)
                     if let resetsAt = limit.resetsAt {
                         Text("Resets in \(UsageFormatting.resetCountdown(until: resetsAt))")
                             .font(.caption2).foregroundStyle(.tertiary)

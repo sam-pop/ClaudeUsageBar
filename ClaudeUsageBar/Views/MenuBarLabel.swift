@@ -11,6 +11,12 @@ struct MenuBarLabel: View {
     var body: some View {
         if viewModel.accounts.isEmpty {
             Image(systemName: "sparkle")
+        } else if viewModel.menuBarDisplayMode == .bars {
+            // Stacked 5h/7d mini-bars per account (single or multi).
+            Image(nsImage: MenuBarImage.twoStat(
+                accounts: viewModel.accounts,
+                snapshots: viewModel.snapshots
+            ))
         } else if viewModel.isSingleAccount {
             singleAccountLabel
         } else {

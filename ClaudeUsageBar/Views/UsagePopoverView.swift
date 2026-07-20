@@ -3,6 +3,28 @@ import SwiftUI
 struct UsagePopoverView: View {
     @ObservedObject var viewModel: AccountsViewModel
 
+    /// Widest matrix we draw inline (≈3 accounts); beyond that the columns scroll horizontally.
+    private static let maxMatrixWidth: CGFloat = 680
+    /// Horizontal padding wrapping the matrix (matches `matrix`'s `.padding(.horizontal, 12)`).
+    private static let matrixHPadding: CGFloat = 24
+
+    private var accountCount: Int { viewModel.accounts.count }
+
+    /// The matrix's grid width: label column + one column per account + hairline separators.
+    private var matrixGridWidth: CGFloat {
+        UsageMatrixView.labelWidth
+            + UsageMatrixView.columnWidth * CGFloat(accountCount)
+            + CGFloat(max(accountCount - 1, 0)) * 0.5
+    }
+
+    /// Grid plus its surrounding padding — the width the matrix actually needs.
+    private var matrixOuterWidth: CGFloat { matrixGridWidth + Self.matrixHPadding }
+
+    /// Single account keeps the original 320-pt column; 2+ accounts widen to fit the matrix.
+    private var popoverWidth: CGFloat {
+        accountCount <= 1 ? 320 : min(matrixOuterWidth, Self.maxMatrixWidth)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -10,24 +32,21 @@ struct UsagePopoverView: View {
 
             if viewModel.accounts.isEmpty {
                 emptyState
-            } else if viewModel.accounts.count <= 3 {
-                // Let the MenuBarExtra window size to the content, like the original popover.
-                // A ScrollView has no ideal height and would collapse to zero in a
-                // self-sizing window — only use one (with a definite height) when there are
-                // enough accounts to actually need scrolling.
-                accountsList
+            } else if accountCount == 1 {
+                // Single account keeps the taller, sparkline-forward layout.
+                singleAccountList
             } else {
-                ScrollView { accountsList }.frame(height: 520)
+                matrix
             }
 
             addAccountControls
             Divider()
             footer.padding(.horizontal, 16).padding(.vertical, 10)
         }
-        .frame(width: 320)
+        .frame(width: popoverWidth)
     }
 
-    private var accountsList: some View {
+    private var singleAccountList: some View {
         VStack(spacing: 14) {
             ForEach(viewModel.accountViews) { view in
                 AccountRowView(viewModel: viewModel, accountView: view)
@@ -35,6 +54,17 @@ struct UsagePopoverView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
+    }
+
+    @ViewBuilder
+    private var matrix: some View {
+        let content = UsageMatrixView(viewModel: viewModel, columns: viewModel.accountViews)
+            .padding(.horizontal, 12).padding(.vertical, 10)
+        if matrixOuterWidth > Self.maxMatrixWidth {
+            ScrollView(.horizontal, showsIndicators: true) { content }
+        } else {
+            content
+        }
     }
 
     // MARK: - Header

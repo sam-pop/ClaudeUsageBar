@@ -29,6 +29,35 @@ struct UsageSnapshotTests {
         #expect(snapshot.sevenDayResetsAt != nil)
     }
 
+    @Test("A window past its reset reads 0%, not the stale pre-reset value")
+    func effectivePercentZeroesExpiredWindow() {
+        let reset = Date(timeIntervalSince1970: 1_000)
+        let snapshot = UsageSnapshot(
+            fiveHourPercent: 100, sevenDayPercent: 60,
+            fiveHourResetsAt: reset,
+            sevenDayResetsAt: Date(timeIntervalSince1970: 10_000),
+            fetchedAt: Date(timeIntervalSince1970: 500)
+        )
+
+        // Before the reset: raw value stands.
+        #expect(snapshot.fiveHourEffectivePercent(now: Date(timeIntervalSince1970: 999)) == 100)
+        // At and after the reset: the window has rolled over to a fresh 0%.
+        #expect(snapshot.fiveHourEffectivePercent(now: reset) == 0)
+        #expect(snapshot.fiveHourEffectivePercent(now: Date(timeIntervalSince1970: 2_000)) == 0)
+        // A different window with a future reset is unaffected.
+        #expect(snapshot.sevenDayEffectivePercent(now: Date(timeIntervalSince1970: 2_000)) == 60)
+    }
+
+    @Test("A window with no known reset keeps its raw percent")
+    func effectivePercentNoResetKeepsRaw() {
+        let snapshot = UsageSnapshot(
+            fiveHourPercent: 73, sevenDayPercent: 40,
+            fiveHourResetsAt: nil, sevenDayResetsAt: nil,
+            fetchedAt: Date(timeIntervalSince1970: 0)
+        )
+        #expect(snapshot.fiveHourEffectivePercent(now: Date(timeIntervalSince1970: 999_999)) == 73)
+    }
+
     @Test("Falls back to non-fractional ISO8601 reset dates")
     func parsesNonFractionalDates() throws {
         let response = UsageResponse(

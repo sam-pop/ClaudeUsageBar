@@ -30,3 +30,4 @@ xcuserdata/
 
 ## Logs
 firebase-debug.log
+.playwright-mcp/

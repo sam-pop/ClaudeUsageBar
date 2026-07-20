@@ -13,18 +13,25 @@ enum MenuBarSelection {
 
     /// Returns the active window for the given mode, or `nil` when there is no snapshot.
     /// Auto mode picks the higher-utilization window; ties go to the 5-hour window (`>=`).
-    static func active(mode: MenuBarDisplayMode, snapshot: UsageSnapshot?) -> Active? {
+    /// Percents are the *effective* values for `now`: a window whose reset has passed reads
+    /// 0, so a stale pre-reset value never sticks and auto never favors an already-reset window.
+    static func active(mode: MenuBarDisplayMode, snapshot: UsageSnapshot?, now: Date = Date()) -> Active? {
         guard let s = snapshot else { return nil }
+
+        let fiveHour = s.fiveHourEffectivePercent(now: now)
+        let sevenDay = s.sevenDayEffectivePercent(now: now)
 
         let useFiveHour: Bool
         switch mode {
-        case .fiveHour: useFiveHour = true
-        case .sevenDay: useFiveHour = false
-        case .auto:     useFiveHour = s.fiveHourPercent >= s.sevenDayPercent
+        case .fiveHour:      useFiveHour = true
+        case .sevenDay:      useFiveHour = false
+        // `.bars` shows both windows and doesn't use this selection; fall back to the
+        // auto rule so any text path (e.g. accessibility) still resolves a sensible window.
+        case .auto, .bars:   useFiveHour = fiveHour >= sevenDay
         }
 
         return useFiveHour
-            ? Active(window: .fiveHour, percent: s.fiveHourPercent, resetsAt: s.fiveHourResetsAt)
-            : Active(window: .sevenDay, percent: s.sevenDayPercent, resetsAt: s.sevenDayResetsAt)
+            ? Active(window: .fiveHour, percent: fiveHour, resetsAt: s.fiveHourResetsAt)
+            : Active(window: .sevenDay, percent: sevenDay, resetsAt: s.sevenDayResetsAt)
     }
 }
