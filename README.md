@@ -76,13 +76,13 @@ When the API reports model-scoped weekly limits (e.g. **Fable**), each account's
 
 **Menu bar** — a compact per-account readout (default), or stacked 5h/7d mini-bars in "Bars" mode:
 
-![Menu bar — default](screenshots/menubar.png)
+![Menu bar — default](screenshots/menubar-default.png)
 
 ![Menu bar — Bars mode](screenshots/menubar-bars.png)
 
 **Popover** — accounts side by side, one row per usage window so the same stat is easy to compare; the higher account in each row is flagged `PEAK`, and a stale account offers a one-tap refresh:
 
-<img src="screenshots/popover.png" width="443" alt="Multi-account comparison popover">
+<img src="screenshots/popover-matrix.png" width="443" alt="Multi-account comparison popover">
 
 ## How It Works
 
