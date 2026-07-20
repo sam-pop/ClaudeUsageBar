@@ -58,7 +58,11 @@ Each account is identified by its Anthropic account ID (fetched from the OAuth p
 
 In the popover, each account has a **✎** to rename it and set a custom **menu-bar prefix** (the `P` / `W` letters — override with anything, e.g. `Me` or `🏠`), and a **🗑** to remove it. Prefixes are auto-derived from labels and de-duplicated when they'd collide.
 
-**Note on the menu bar with 2+ accounts:** the bar shows each account's percentage but drops the reset countdown to stay compact — open the popover for full countdowns, progress bars, and sparklines per account.
+**Note on the menu bar with 2+ accounts:** the bar shows each account's percentage but drops the reset countdown to stay compact — open the popover for full countdowns, progress bars, and sparklines per account. In **Auto** mode each account independently picks its higher window, so the bar tags each percentage with `5h` or `7d` to keep the numbers comparable.
+
+### Per-model limits
+
+When the API reports model-scoped weekly limits (e.g. **Fable**), each account's popover shows a **Per-model (weekly)** section with the model name, its percentage, a progress bar, and the reset countdown. This surfaces per-model caps that the top-level 5-hour / 7-day numbers don't reflect.
 
 | Target | Description |
 |--------|-------------|
@@ -114,6 +118,8 @@ Claude Code Keychain item ──▶ captured per account (Add current account)
 | Feature | Detail |
 |---------|--------|
 | **Multiple accounts** | Track 1+ accounts, each refreshing independently; deduped by Anthropic account ID |
+| **Per-model limits** | Model-scoped weekly caps (e.g. Fable) shown per account in the popover |
+| **Auto-mode window tags** | With 2+ accounts, the bar tags each percent `5h`/`7d` so mixed windows stay comparable |
 | **Per-account, per-window notifications** | Separate alerts per account for the 5-hour and 7-day windows, e.g. "Work: 5-hour window at 82%" |
 | **Configurable thresholds** | Defaults to 80% and 90%; override via `defaults` (see below) |
 | **Single-item Keychain store** | All accounts in one app-owned Keychain item; verified writes never clobber other accounts |

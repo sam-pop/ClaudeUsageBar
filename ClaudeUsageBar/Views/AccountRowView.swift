@@ -92,25 +92,31 @@ struct AccountRowView: View {
     }
 
     private func modelLimitsSection(_ limits: [ModelLimit]) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             Text("Per-model (weekly)")
-                .font(.caption2).fontWeight(.medium).foregroundStyle(.secondary)
+                .font(.caption).fontWeight(.medium).foregroundStyle(.secondary)
             ForEach(limits) { limit in
-                HStack(spacing: 6) {
-                    Text(limit.modelName).font(.caption).lineLimit(1)
-                    Spacer()
+                let color: Color = limit.severity == "critical" ? .red : UsageColor.level(limit.percent)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(limit.modelName)
+                            .font(.system(.subheadline, weight: .semibold))
+                            .lineLimit(1)
+                        Spacer()
+                        Text("\(limit.percent)%")
+                            .font(.system(.title3, design: .rounded, weight: .bold))
+                            .monospacedDigit()
+                            .foregroundStyle(color)
+                    }
+                    ProgressBarView(percent: limit.percent, color: color)
                     if let resetsAt = limit.resetsAt {
-                        Text("resets \(UsageFormatting.resetCountdown(until: resetsAt))")
+                        Text("Resets in \(UsageFormatting.resetCountdown(until: resetsAt))")
                             .font(.caption2).foregroundStyle(.tertiary)
                     }
-                    Text("\(limit.percent)%")
-                        .font(.system(.caption, design: .rounded, weight: .semibold))
-                        .monospacedDigit()
-                        .foregroundStyle(limit.severity == "critical" ? .red : UsageColor.level(limit.percent))
                 }
             }
         }
-        .padding(10)
+        .padding(12)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.04)))
     }
 
