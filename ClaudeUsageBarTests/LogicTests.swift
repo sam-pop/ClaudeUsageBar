@@ -6,6 +6,8 @@ import Foundation
 @Suite("MenuBarSelection.active")
 struct MenuBarSelectionTests {
 
+    // Resets sit in the future relative to `testNow`, so the windows are live (not expired).
+    private let testNow = Date(timeIntervalSince1970: 50)
     private func snapshot(fiveHour: Int, sevenDay: Int) -> UsageSnapshot {
         UsageSnapshot(
             fiveHourPercent: fiveHour,
@@ -19,30 +21,45 @@ struct MenuBarSelectionTests {
     @Test("Auto picks higher window, ties go to 5h, explicit modes honored, nil snapshot")
     func selection() throws {
         // Auto picks the higher-utilization window.
-        let autoHigh5h = try #require(MenuBarSelection.active(mode: .auto, snapshot: snapshot(fiveHour: 90, sevenDay: 40)))
+        let autoHigh5h = try #require(MenuBarSelection.active(mode: .auto, snapshot: snapshot(fiveHour: 90, sevenDay: 40), now: testNow))
         #expect(autoHigh5h.window == .fiveHour)
         #expect(autoHigh5h.percent == 90)
         #expect(autoHigh5h.resetsAt == Date(timeIntervalSince1970: 100))
 
-        let autoHigh7d = try #require(MenuBarSelection.active(mode: .auto, snapshot: snapshot(fiveHour: 30, sevenDay: 70)))
+        let autoHigh7d = try #require(MenuBarSelection.active(mode: .auto, snapshot: snapshot(fiveHour: 30, sevenDay: 70), now: testNow))
         #expect(autoHigh7d.window == .sevenDay)
         #expect(autoHigh7d.percent == 70)
 
         // Tie goes to the 5-hour window (>=).
-        let tie = try #require(MenuBarSelection.active(mode: .auto, snapshot: snapshot(fiveHour: 50, sevenDay: 50)))
+        let tie = try #require(MenuBarSelection.active(mode: .auto, snapshot: snapshot(fiveHour: 50, sevenDay: 50), now: testNow))
         #expect(tie.window == .fiveHour)
 
         // Explicit modes override utilization comparison.
-        let explicit5h = try #require(MenuBarSelection.active(mode: .fiveHour, snapshot: snapshot(fiveHour: 10, sevenDay: 90)))
+        let explicit5h = try #require(MenuBarSelection.active(mode: .fiveHour, snapshot: snapshot(fiveHour: 10, sevenDay: 90), now: testNow))
         #expect(explicit5h.window == .fiveHour)
         #expect(explicit5h.percent == 10)
 
-        let explicit7d = try #require(MenuBarSelection.active(mode: .sevenDay, snapshot: snapshot(fiveHour: 90, sevenDay: 10)))
+        let explicit7d = try #require(MenuBarSelection.active(mode: .sevenDay, snapshot: snapshot(fiveHour: 90, sevenDay: 10), now: testNow))
         #expect(explicit7d.window == .sevenDay)
         #expect(explicit7d.percent == 10)
 
         // Nil snapshot yields nil.
-        #expect(MenuBarSelection.active(mode: .auto, snapshot: nil) == nil)
+        #expect(MenuBarSelection.active(mode: .auto, snapshot: nil, now: testNow) == nil)
+    }
+
+    @Test("A window past its reset reads 0%, and auto de-selects it in favor of a live window")
+    func expiredWindowResetsToZero() throws {
+        // 5h reset at t=100, 7d reset at t=200; observe at t=150 → 5h expired, 7d live.
+        let afterFiveHourReset = Date(timeIntervalSince1970: 150)
+
+        // Explicit 5h: the stale 100% reads as a fresh 0% once the reset has passed.
+        let expired5h = try #require(MenuBarSelection.active(mode: .fiveHour, snapshot: snapshot(fiveHour: 100, sevenDay: 20), now: afterFiveHourReset))
+        #expect(expired5h.percent == 0)
+
+        // Auto no longer treats the expired 5h (now 0%) as the worst window; it picks the live 7d.
+        let auto = try #require(MenuBarSelection.active(mode: .auto, snapshot: snapshot(fiveHour: 100, sevenDay: 20), now: afterFiveHourReset))
+        #expect(auto.window == .sevenDay)
+        #expect(auto.percent == 20)
     }
 }
 

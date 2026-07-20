@@ -79,6 +79,23 @@ struct UsageSnapshot: Codable {
         max(fiveHourPercent, sevenDayPercent)
     }
 
+    /// A usage window resets to 0 the instant its `resetsAt` passes. Until the next refresh
+    /// reports the fresh window, the cached percent is stale — so once `now` reaches the
+    /// reset, report 0 rather than the pre-reset value. Prevents the menu bar / popover from
+    /// sticking at "100%" (or whatever it last was) after the countdown hits "now".
+    static func effectivePercent(_ percent: Int, resetsAt: Date?, now: Date = Date()) -> Int {
+        guard let resetsAt else { return percent }
+        return now >= resetsAt ? 0 : percent
+    }
+
+    func fiveHourEffectivePercent(now: Date = Date()) -> Int {
+        Self.effectivePercent(fiveHourPercent, resetsAt: fiveHourResetsAt, now: now)
+    }
+
+    func sevenDayEffectivePercent(now: Date = Date()) -> Int {
+        Self.effectivePercent(sevenDayPercent, resetsAt: sevenDayResetsAt, now: now)
+    }
+
     init(fiveHourPercent: Int, sevenDayPercent: Int, fiveHourResetsAt: Date?, sevenDayResetsAt: Date?, fetchedAt: Date, modelLimits: [ModelLimit]? = nil) {
         self.fiveHourPercent = fiveHourPercent
         self.sevenDayPercent = sevenDayPercent
