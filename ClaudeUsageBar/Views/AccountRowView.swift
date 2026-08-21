@@ -18,6 +18,16 @@ struct AccountRowView: View {
 
             if isEditing { editor }
 
+            // Above the snapshot check on purpose: a dead login usually leaves the last
+            // snapshot in place, so gating this on `snapshot == nil` hid the only way back in
+            // behind an "Updated 3h ago" line that looked healthy.
+            LoginPill(viewModel: viewModel, accountID: account.id)
+
+            // Only worth showing once the pill above has nothing to say: a dead or
+            // recovering login already explains itself, and the countdown would just be
+            // noise beside it.
+            loginExpiryWarning
+
             if let snapshot = accountView.snapshot {
                 usageSections(snapshot)
                 if let limits = snapshot.modelLimits, !limits.isEmpty {
@@ -51,7 +61,7 @@ struct AccountRowView: View {
             } label: { Image(systemName: "pencil").font(.system(size: 10)) }
                 .buttonStyle(.borderless).help("Rename / set menu-bar code")
             Button(role: .destructive) {
-                viewModel.remove(account.id)
+                Task { await viewModel.remove(account.id) }
             } label: { Image(systemName: "trash").font(.system(size: 10)) }
                 .buttonStyle(.borderless).help("Remove this account")
         }
@@ -76,6 +86,39 @@ struct AccountRowView: View {
                     isEditing = false
                 }
                 .controlSize(.mini).buttonStyle(.borderedProminent)
+            }
+        }
+    }
+
+    // MARK: - Login expiry
+
+    /// Gated on the warning already existing (not just on `loginAffordance == .none`, which
+    /// is true for the vast majority of healthy accounts) so this contributes NOTHING to the
+    /// enclosing `VStack` — not even an empty `TimelineView` — when there's nothing to show.
+    /// A conditionally-mounted `TimelineView` still counts as a present child for spacing
+    /// purposes even when its own content renders empty, so gating only the inner content
+    /// left a permanent extra 8pt gap above the usage sections on every healthy account.
+    @ViewBuilder
+    private var loginExpiryWarning: some View {
+        if viewModel.loginAffordance(for: account.id) == .none,
+           LoginExpiry.warning(refreshTokenExpiresAt: accountView.refreshTokenExpiresAt, now: Date()) != nil {
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                if let warning = LoginExpiry.warning(
+                    refreshTokenExpiresAt: accountView.refreshTokenExpiresAt, now: context.date
+                ) {
+                    Button {
+                        Task { await viewModel.beginLogin(account.id) }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "clock.badge.exclamationmark")
+                                .font(.system(size: 9)).foregroundStyle(.orange)
+                            Text(warning).font(.caption2).foregroundStyle(.orange)
+                            Spacer(minLength: 0)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .help("Opens claude.ai in your browser to sign in")
+                }
             }
         }
     }
@@ -136,24 +179,14 @@ struct AccountRowView: View {
         }
     }
 
+    /// The refresh error only. Anything to do with logging back in is `LoginPill`'s, hoisted
+    /// out of this banner so it shows whether or not there's a snapshot.
     private func errorBanner(_ message: String) -> some View {
-        VStack(spacing: 6) {
-            HStack(spacing: 6) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 10)).foregroundStyle(.orange)
-                Text(message).font(.caption2).foregroundStyle(.secondary).lineLimit(3)
-                Spacer(minLength: 4)
-            }
-            if viewModel.needsReAuth[account.id] == true {
-                Button {
-                    Task { await viewModel.rereadFromClaudeCode(account.id) }
-                } label: {
-                    Label("Re-read from Claude Code", systemImage: "key.fill")
-                        .font(.system(size: 10, weight: .medium))
-                }
-                .controlSize(.mini).buttonStyle(.borderedProminent)
-                .help("Make sure Claude Code is logged into THIS account first")
-            }
+        HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 10)).foregroundStyle(.orange)
+            Text(message).font(.caption2).foregroundStyle(.secondary).lineLimit(3)
+            Spacer(minLength: 4)
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)

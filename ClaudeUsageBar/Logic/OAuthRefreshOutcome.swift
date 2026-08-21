@@ -9,7 +9,7 @@ import Foundation
 /// plane-mode blip would permanently strand an account. Only hard rejections count now.
 enum OAuthRefreshOutcome: Equatable {
     /// The token endpoint rejected the refresh token (invalid_grant-shaped: 400/401/403).
-    /// Counts toward the breaker; enough of these → stop and surface re-capture.
+    /// Counts toward the breaker; enough of these → stop and surface re-login.
     case rejected
     /// Offline/timeout, 429 rate-limit, or 5xx server error. The refresh token is probably
     /// still valid — do NOT count toward the breaker; retry later.

@@ -44,7 +44,10 @@ struct RefreshCircuitBreaker: Equatable {
         reset()
     }
 
-    private mutating func reset() {
+    /// Fully un-trips the breaker back to its initial state, keeping `maxFailures`/
+    /// `reArmInterval` as configured (unlike reassigning a fresh `RefreshCircuitBreaker()`,
+    /// which would also reset those to their defaults).
+    mutating func reset() {
         consecutiveRejections = 0
         trippedAt = nil
     }

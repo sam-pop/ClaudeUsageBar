@@ -1,47 +1,25 @@
 import Testing
 import Foundation
 
-// MARK: - KeychainService.parseCredentials / hexDecode
+// MARK: - CachedCredentials refresh expiry
 
-@Suite("KeychainService credential parsing")
-struct KeychainServiceParseTests {
-
-    @Test("Parses Claude Code OAuth JSON blob including millisecond expiresAt")
-    func parsesJSONBlob() throws {
-        let expiresMs: Double = 1_783_002_600_000 // 2026-07-09T18:30:00Z in ms
-        let json = """
-        {"claudeAiOauth":{"accessToken":"sk-ant-oat01-abc123","refreshToken":"sk-ant-ort01-xyz789","expiresAt":\(Int(expiresMs))}}
-        """
-        let creds = try #require(KeychainService.parseCredentials(from: Data(json.utf8)))
-        #expect(creds.accessToken == "sk-ant-oat01-abc123")
-        #expect(creds.refreshToken == "sk-ant-ort01-xyz789")
-        let expiresAt = try #require(creds.expiresAt)
-        #expect(abs(expiresAt.timeIntervalSince1970 - expiresMs / 1000) < 0.001)
+@Suite("CachedCredentials refresh expiry")
+struct CachedCredentialsExpiry {
+    @Test("Legacy payload without refreshTokenExpiresAt decodes with nil")
+    func legacyDecodes() throws {
+        let legacy = #"{"accessToken":"a","refreshToken":"r"}"#
+        let creds = try JSONDecoder().decode(CachedCredentials.self, from: Data(legacy.utf8))
+        #expect(creds.refreshTokenExpiresAt == nil)
+        #expect(creds.accessToken == "a")
     }
 
-    @Test("Hex-wrapped JSON blob decodes then parses")
-    func parsesHexWrappedBlob() throws {
-        let json = #"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-hex","refreshToken":"r"}}"#
-        let hex = Data(json.utf8).map { String(format: "%02x", $0) }.joined()
-        let decoded = try #require(KeychainService.hexDecode(hex))
-        let creds = try #require(KeychainService.parseCredentials(from: decoded))
-        #expect(creds.accessToken == "sk-ant-oat01-hex")
-        #expect(creds.refreshToken == "r")
-        #expect(creds.expiresAt == nil)
-    }
-
-    @Test("Regex fallback extracts token from non-JSON text")
-    func regexFallback() throws {
-        let text = "garbage prefix sk-ant-oat01-Token_ABC-123 trailing junk"
-        let creds = try #require(KeychainService.parseCredentials(from: Data(text.utf8)))
-        #expect(creds.accessToken == "sk-ant-oat01-Token_ABC-123")
-        #expect(creds.refreshToken == nil)
-        #expect(creds.expiresAt == nil)
-    }
-
-    @Test("hexDecode rejects odd-length input")
-    func hexDecodeRejectsOddLength() {
-        #expect(KeychainService.hexDecode("abc") == nil)
+    @Test("Round-trips a set refreshTokenExpiresAt")
+    func roundTrips() throws {
+        let when = Date(timeIntervalSince1970: 1_760_000_000)
+        let creds = CachedCredentials(accessToken: "a", refreshToken: "r", expiresAt: nil, refreshTokenExpiresAt: when)
+        let data = try JSONEncoder().encode(creds)
+        let back = try JSONDecoder().decode(CachedCredentials.self, from: data)
+        #expect(back.refreshTokenExpiresAt == when)
     }
 }
 
@@ -153,6 +131,12 @@ struct KeychainMigrationTests {
         // Round-trip verification failed, so the only surviving copy (the file) must remain.
         #expect(FileManager.default.fileExists(atPath: legacyURL.path))
     }
+
+    @Test("Empty store + no legacy file → nil (no Claude Code keychain fallback)")
+    func noClaudeCodeFallback() {
+        KeychainService.store = InMemoryCredentialStore()          // empty
+        #expect(KeychainService.getCredentials(legacyFileURL: tempLegacyURL()) == nil)
+    }
 }
 
 // MARK: - CachedCredentials.needsRefresh
@@ -195,7 +179,7 @@ struct CachedCredentialsNeedsRefreshTests {
 @Suite("UsageAPIError classification")
 struct UsageAPIErrorTests {
 
-    @Test("Auth, transient, and keychain-refresh flags are correct")
+    @Test("Auth, transient, and re-login flags are correct")
     func classification() {
         // 401/403 are auth errors, not transient.
         #expect(UsageAPIError.invalidResponse(401).isAuthError)
@@ -213,9 +197,9 @@ struct UsageAPIErrorTests {
         // Network failures are transient.
         #expect(UsageAPIError.requestFailed(URLError(.timedOut)).isTransient)
 
-        // noToken / tokenExpired need a keychain refresh.
-        #expect(UsageAPIError.noToken.needsKeychainRefresh)
-        #expect(UsageAPIError.tokenExpired.needsKeychainRefresh)
-        #expect(!UsageAPIError.invalidResponse(500).needsKeychainRefresh)
+        // noToken / tokenExpired need a re-login.
+        #expect(UsageAPIError.noToken.needsReLogin)
+        #expect(UsageAPIError.tokenExpired.needsReLogin)
+        #expect(!UsageAPIError.invalidResponse(500).needsReLogin)
     }
 }

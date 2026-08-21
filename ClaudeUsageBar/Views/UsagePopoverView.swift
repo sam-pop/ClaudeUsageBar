@@ -83,7 +83,7 @@ struct UsagePopoverView: View {
             Image(systemName: "person.crop.circle.badge.plus")
                 .font(.title2).foregroundStyle(.secondary)
             Text("No accounts yet").font(.callout).fontWeight(.medium)
-            Text("Log into Claude Code, then add the current account below.")
+            Text("Add an account below to start tracking its usage.")
                 .font(.caption).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
@@ -92,21 +92,27 @@ struct UsagePopoverView: View {
 
     private var addAccountControls: some View {
         VStack(spacing: 4) {
-            Button {
-                Task { await viewModel.addCurrentAccount() }
-            } label: {
-                Label("Add current account", systemImage: "plus.circle")
-                    .font(.system(size: 12, weight: .medium))
-                    .frame(maxWidth: .infinity)
+            // Once an add-account login is running, its own controls replace the button that
+            // started it — starting a second one would be refused anyway.
+            if viewModel.loginAffordance(for: nil) == .none {
+                Button {
+                    Task { await viewModel.beginLogin(nil) }
+                } label: {
+                    Label("Add account…", systemImage: "plus.circle")
+                        .font(.system(size: 12, weight: .medium))
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.small)
+                .help("Opens claude.ai in your browser to sign in")
+            } else {
+                LoginPill(viewModel: viewModel, accountID: nil)
             }
-            .controlSize(.small)
-            .help("Captures whichever account Claude Code is currently logged into")
 
             if let error = viewModel.addAccountError {
                 Text(error).font(.caption2).foregroundStyle(.secondary)
                     .multilineTextAlignment(.center).lineLimit(3)
             } else {
-                Text("Tip: switch Claude Code's login first to add a different account.")
+                Text("Sign in with the browser — one account at a time.")
                     .font(.caption2).foregroundStyle(.tertiary)
             }
         }

@@ -35,17 +35,27 @@ final class AccountRuntime {
         /// Fired for each newly-crossed usage threshold, so the coordinator can post a
         /// per-account notification. Optional so tests can omit it.
         var onThresholdCrossing: ((ThresholdTracker.Crossing) -> Void)?
+        /// Fired at most once per `refresh()` for the most urgent newly-crossed
+        /// login-expiry threshold, so the coordinator can post a per-account pre-expiry
+        /// notification. `threshold` is the day-bucket (3 or 1) that fired, for a stable
+        /// notification identifier; `daysRemaining` is the true remaining days, for the
+        /// notification body — they can differ (e.g. a threshold re-fires at a smaller
+        /// true remaining-days count than when it first fired). Optional so tests can
+        /// omit it.
+        var onLoginExpiryCrossing: ((_ threshold: Int, _ daysRemaining: Int) -> Void)?
 
         init(
             fetchUsage: @escaping (String) async throws -> UsageResponse,
             refreshToken: @escaping (CachedCredentials) async throws -> CachedCredentials,
             now: @escaping () -> Date,
-            onThresholdCrossing: ((ThresholdTracker.Crossing) -> Void)? = nil
+            onThresholdCrossing: ((ThresholdTracker.Crossing) -> Void)? = nil,
+            onLoginExpiryCrossing: ((_ threshold: Int, _ daysRemaining: Int) -> Void)? = nil
         ) {
             self.fetchUsage = fetchUsage
             self.refreshToken = refreshToken
             self.now = now
             self.onThresholdCrossing = onThresholdCrossing
+            self.onLoginExpiryCrossing = onLoginExpiryCrossing
         }
     }
 
@@ -54,6 +64,10 @@ final class AccountRuntime {
     private(set) var snapshot: UsageSnapshot?
     private(set) var history: [UsageDataPoint] = []
     private(set) var needsReAuth = false
+    /// The stored credentials' refresh-token expiry, refreshed alongside every fetch —
+    /// never read from the keychain on its own, so the coordinator can mirror it into a
+    /// `@Published` property without per-render I/O.
+    private(set) var refreshTokenExpiresAt: Date?
 
     private let credentials: AccountCredentialManager
     private let persistence: AccountPersistence
@@ -61,7 +75,13 @@ final class AccountRuntime {
     private let onChange: () -> Void
     private var breaker: RefreshCircuitBreaker
     private var thresholdTracker: ThresholdTracker
+    private var loginExpiryNotifier = LoginExpiry.Notifier()
     private var refreshTask: Task<Void, Never>?
+    /// Bumped by `credentialsReplaced()`. A `refresh()` call captures this at entry and
+    /// checks it again after its awaited fetch returns; if it no longer matches, a newer
+    /// `refresh()` (from `credentialsReplaced()`) has already run to completion, so this
+    /// call's result is stale and must not overwrite `state`/`needsReAuth`/`snapshot`.
+    private var epoch = 0
 
     private static let maxHistoryPoints = 288      // 24 hours at 5-min sampling
     private static let historySampleInterval: TimeInterval = 300
@@ -88,9 +108,11 @@ final class AccountRuntime {
     }
 
     func refresh() async {
+        let startEpoch = epoch
         if snapshot == nil { state = .loading }
         do {
             let snap = try await fetchWithRetry()
+            guard startEpoch == epoch else { return }
             snapshot = snap
             state = .loaded(snap)
             needsReAuth = false
@@ -98,9 +120,11 @@ final class AccountRuntime {
             recordHistory(snap)
             checkThresholds(snap)
         } catch let error as UsageAPIError {
+            guard startEpoch == epoch else { return }
             state = .error(error.localizedDescription)
-            needsReAuth = error.needsKeychainRefresh
+            needsReAuth = error.needsReLogin
         } catch {
+            guard startEpoch == epoch else { return }
             state = .error(error.localizedDescription)
         }
         onChange()
@@ -109,6 +133,20 @@ final class AccountRuntime {
     func stop() {
         refreshTask?.cancel()
         refreshTask = nil
+    }
+
+    /// Called after new credentials have been stored for this account (e.g. a fresh
+    /// browser login). Resets the circuit breaker to a fresh un-tripped state — the prior
+    /// breaker may still be tripped from the dead-token era and would otherwise keep
+    /// blocking refresh attempts for up to its re-arm window even though the new
+    /// credentials are known-good — clears `needsReAuth`, bumps `epoch` so a `refresh()`
+    /// already in flight (e.g. a timer tick that started against the old credentials)
+    /// cannot clobber this call's result when it later resumes, and re-fetches.
+    func credentialsReplaced() async {
+        epoch += 1
+        breaker.reset()
+        needsReAuth = false
+        await refresh()
     }
 
     // MARK: - Fetch with retry + OAuth refresh
@@ -124,6 +162,13 @@ final class AccountRuntime {
         if creds.needsRefresh(), breaker.allowsAttempt(now: deps.now()) {
             if let refreshed = await tryTokenRefresh(creds) { creds = refreshed }
         }
+
+        // Checked after the proactive-refresh attempt above (not before) — that attempt is
+        // gated on the ACCESS token's own `expiresAt`, never this one, but when it succeeds
+        // it also re-arms the refresh token's ~28-day window, so reading `creds` here
+        // (already reassigned above on success) reflects the new expiry, not the old one.
+        refreshTokenExpiresAt = creds.refreshTokenExpiresAt
+        checkLoginExpiry(creds.refreshTokenExpiresAt)
 
         let policy = RetryPolicy()
         var rng = SystemRandomNumberGenerator()
@@ -151,7 +196,15 @@ final class AccountRuntime {
     /// Returns the new credentials on success, `nil` on failure.
     private func tryTokenRefresh(_ creds: CachedCredentials) async -> CachedCredentials? {
         do {
-            let refreshed = try await deps.refreshToken(creds)
+            var refreshed = try await deps.refreshToken(creds)
+            // A refresh response that omits refresh_token_expires_in must not be read as
+            // "expiry unknown" — carry forward the prior value as a conservative floor:
+            // under token rotation the true expiry can only be later, and nil would
+            // silently disable the expiry warning entirely.
+            if refreshed.refreshTokenExpiresAt == nil {
+                refreshed.refreshTokenExpiresAt = creds.refreshTokenExpiresAt
+            }
+            refreshTokenExpiresAt = refreshed.refreshTokenExpiresAt
             breaker.recordSuccess()
             try? credentials.update(id: id, credentials: refreshed)
             return refreshed
@@ -185,5 +238,16 @@ final class AccountRuntime {
             sevenDay: snapshot.sevenDayPercent
         )
         for crossing in crossings { deps.onThresholdCrossing?(crossing) }
+    }
+
+    /// Run once credentials are available on every `refresh()`, regardless of whether the
+    /// usage fetch afterward succeeds — the refresh token's expiry comes from the
+    /// already-loaded credentials, not the network. Fires only the single most urgent
+    /// threshold crossed this call (the smallest day-count), so a jump past both 3d and 1d
+    /// at once posts one notification, not two.
+    private func checkLoginExpiry(_ expiresAt: Date?) {
+        let crossings = loginExpiryNotifier.check(refreshTokenExpiresAt: expiresAt, now: deps.now())
+        guard let threshold = crossings.min(), let expiresAt else { return }
+        deps.onLoginExpiryCrossing?(threshold, LoginExpiry.daysRemaining(until: expiresAt, now: deps.now()))
     }
 }

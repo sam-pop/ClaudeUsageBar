@@ -2,13 +2,13 @@ import Foundation
 
 /// One tracked Claude account. `id` is the app's own stable handle and the key into
 /// the credential map; `accountUUID`/`email` come from the OAuth profile endpoint at
-/// capture time and drive labeling, dedupe, and the re-read identity guard.
+/// capture time and drive labeling, dedupe, and the re-auth identity guard.
 struct Account: Codable, Identifiable, Equatable {
     let id: UUID
     var label: String
     /// Stable Claude account identity from the OAuth profile endpoint. `nil` until it has
     /// been fetched — the case for a legacy-migrated account (identity unknown at migration
-    /// time, backfilled on the first successful profile fetch). Dedupe and the re-read
+    /// time, backfilled on the first successful profile fetch). Dedupe and the re-auth
     /// identity guard only apply once this is populated.
     var accountUUID: String?
     var email: String?
