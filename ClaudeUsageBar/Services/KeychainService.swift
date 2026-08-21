@@ -26,7 +26,9 @@ enum KeychainServiceError: Error {
 
 enum KeychainService {
     private static let oauthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-    private static let oauthTokenURL = URL(string: "https://console.anthropic.com/v1/oauth/token")!
+    /// Single source of truth for the token endpoint URL is `OAuthEndpoints.token`
+    /// (`OAuthLoginModels.swift`); this force-unwrap mirrors the one already taken there.
+    private static var oauthTokenURL: URL { URL(string: OAuthEndpoints.token)! }
 
     /// Where the app persists its own copy of the credentials. Injectable seam for tests.
     /// `nonisolated(unsafe)`: the value is Sendable and only tests mutate it, from a single
