@@ -19,7 +19,7 @@ final class AccountsViewModel: ObservableObject {
     @Published var launchAtLoginError: String?
     @Published var notificationsAuthorized: Bool?
     @Published var menuBarDisplayMode: MenuBarDisplayMode {
-        didSet { UserDefaults.standard.set(menuBarDisplayMode.rawValue, forKey: "menuBarDisplayMode") }
+        didSet { defaults.set(menuBarDisplayMode.rawValue, forKey: "menuBarDisplayMode") }
     }
 
     /// Where a browser login currently stands for one account. Keyed by account id for a
@@ -32,55 +32,52 @@ final class AccountsViewModel: ObservableObject {
     }
 
     @Published private(set) var loginState: [UUID: LoginState] = [:]
-    /// The login this view model is currently driving, if any — exactly one at a time
-    /// across both the re-auth and add-account flows.
+    /// The login this view model is currently driving, if any. The browser-login flow
+    /// (added on top of this seam) is intended to keep at most one login in flight at a
+    /// time, whether it's re-auth for an existing account or the accountID==nil
+    /// add-account path.
     @Published private(set) var pendingLogin: PendingLogin?
     /// Login state for the accountID==nil "add account" flow, mirroring `loginState`'s
     /// per-account entries.
     @Published var addLoginState: LoginState = .idle
 
-    /// Injected login/exchange/identity/clock seam for the browser OAuth flow, mirroring
-    /// `AccountRuntime.Dependencies`. Kept separate from `AccountRuntime.Dependencies`
-    /// because this coordinator's login flow needs `openURL` and no other runtime does.
-    struct Dependencies {
-        var beginLogin: (_ accountID: UUID?, _ forcePaste: Bool, _ loginHintEmail: String?) async throws
+    /// Injected seam for this coordinator's system-touching work: the browser OAuth flow
+    /// plus the one-time legacy migration's keychain/filesystem calls. Kept separate from
+    /// `AccountRuntime.Dependencies` — that type owns per-account refresh I/O, this owns
+    /// coordinator-level I/O.
+    struct Dependencies: Sendable {
+        var beginLogin: @Sendable (_ accountID: UUID?, _ forcePaste: Bool, _ loginHintEmail: String?) async throws
             -> (pending: PendingLogin, authorizeURL: URL, server: LoopbackServer?, callback: Task<String?, Never>?)
-        var exchange: (_ code: String, _ pending: PendingLogin) async throws -> CachedCredentials
-        var fetchIdentity: (_ token: String) async throws -> AccountIdentity
-        var openURL: (URL) -> Void
-        var now: () -> Date
+        var exchange: @Sendable (_ code: String, _ pending: PendingLogin) async throws -> CachedCredentials
+        var fetchIdentity: @Sendable (_ token: String) async throws -> AccountIdentity
+        var openURL: @Sendable (URL) -> Void
+        var now: @Sendable () -> Date
         /// Reads the legacy single-account credentials for the one-time `AccountMigration`
-        /// run at init. A test double must return `nil` here — the real implementation
-        /// falls through to Claude Code's keychain item, which can show a system prompt.
-        var resolveLegacyCredentials: () -> CachedCredentials?
+        /// run at init. A test double must not perform real keychain I/O — return `nil`,
+        /// or canned credentials to exercise the migration branch.
+        var resolveLegacyCredentials: @Sendable () -> CachedCredentials?
         /// Deletes the legacy plaintext cache file and the legacy single-account keychain
-        /// item, once migration has verified the new copy landed. A test double must be a
-        /// no-op — the real implementation touches the keychain and the filesystem.
-        var deleteLegacyArtifacts: () -> Void
+        /// item, once migration has verified the new copy landed. A test double must not
+        /// touch the real keychain or filesystem; recording the call is the point.
+        var deleteLegacyArtifacts: @Sendable () -> Void
+        /// Requests notification authorization and reports whether it's granted, or `nil`
+        /// if the request couldn't be completed. A test double must not touch
+        /// `UNUserNotificationCenter` at all — return `nil`.
+        var requestNotificationAuthorization: @Sendable () async -> Bool?
+        /// Fetches usage for one account's access token. Threaded into every attached
+        /// `AccountRuntime.Dependencies` so a test controls it instead of hitting the
+        /// real API.
+        var fetchUsage: @Sendable (_ token: String) async throws -> UsageResponse
+        /// Refreshes one account's OAuth token. Threaded into every attached
+        /// `AccountRuntime.Dependencies` so a test controls it instead of hitting the
+        /// real API.
+        var refreshToken: @Sendable (_ credentials: CachedCredentials) async throws -> CachedCredentials
 
-        init(
-            beginLogin: @escaping (_ accountID: UUID?, _ forcePaste: Bool, _ loginHintEmail: String?) async throws
-                -> (pending: PendingLogin, authorizeURL: URL, server: LoopbackServer?, callback: Task<String?, Never>?),
-            exchange: @escaping (_ code: String, _ pending: PendingLogin) async throws -> CachedCredentials,
-            fetchIdentity: @escaping (_ token: String) async throws -> AccountIdentity,
-            openURL: @escaping (URL) -> Void,
-            now: @escaping () -> Date,
-            resolveLegacyCredentials: @escaping () -> CachedCredentials?,
-            deleteLegacyArtifacts: @escaping () -> Void
-        ) {
-            self.beginLogin = beginLogin
-            self.exchange = exchange
-            self.fetchIdentity = fetchIdentity
-            self.openURL = openURL
-            self.now = now
-            self.resolveLegacyCredentials = resolveLegacyCredentials
-            self.deleteLegacyArtifacts = deleteLegacyArtifacts
-        }
-
-        /// Wires the real `OAuthLoginService`, `ProfileService`, system browser opener, and
-        /// the legacy-migration keychain/filesystem calls `AccountsViewModel.init` used to
-        /// hardcode. Builds closures only — none of them run until the view model calls
-        /// one, so constructing `.live` performs no I/O.
+        /// Wires the real `OAuthLoginService`, `ProfileService`, `NSWorkspace` browser
+        /// opener, `UsageAPIService`/`KeychainService` usage-refresh calls, notification
+        /// authorization, and the legacy-migration keychain/filesystem calls this view
+        /// model used to hardcode. Builds closures only — none of them run until the view
+        /// model calls one, so constructing `.live` performs no I/O.
         static var live: Dependencies {
             Dependencies(
                 beginLogin: { accountID, forcePaste, loginHintEmail in
@@ -101,6 +98,19 @@ final class AccountsViewModel: ObservableObject {
                 deleteLegacyArtifacts: {
                     KeychainCredentialStore().delete()
                     try? FileManager.default.removeItem(at: KeychainService.defaultLegacyCacheURL)
+                },
+                requestNotificationAuthorization: {
+                    let center = UNUserNotificationCenter.current()
+                    _ = try? await center.requestAuthorization(options: [.alert, .sound])
+                    let settings = await center.notificationSettings()
+                    return settings.authorizationStatus == .authorized
+                },
+                fetchUsage: { try await UsageAPIService.fetch(token: $0) },
+                refreshToken: { creds in
+                    guard let refreshToken = creds.refreshToken else {
+                        throw KeychainServiceError.noRefreshToken
+                    }
+                    return try await KeychainService.performOAuthRefresh(refreshToken: refreshToken)
                 }
             )
         }
@@ -207,15 +217,10 @@ final class AccountsViewModel: ObservableObject {
 
     private func attachRuntime(for account: Account) {
         let id = account.id
-        let deps = AccountRuntime.Dependencies(
-            fetchUsage: { try await UsageAPIService.fetch(token: $0) },
-            refreshToken: { creds in
-                guard let refreshToken = creds.refreshToken else {
-                    throw KeychainServiceError.noRefreshToken
-                }
-                return try await KeychainService.performOAuthRefresh(refreshToken: refreshToken)
-            },
-            now: { Date() },
+        let runtimeDeps = AccountRuntime.Dependencies(
+            fetchUsage: deps.fetchUsage,
+            refreshToken: deps.refreshToken,
+            now: deps.now,
             onThresholdCrossing: { [weak self] crossing in
                 self?.sendNotification(account: account, crossing: crossing)
             }
@@ -224,7 +229,7 @@ final class AccountsViewModel: ObservableObject {
             id: id,
             credentials: credentials,
             persistence: AccountPersistence(defaults: defaults, accountID: id),
-            deps: deps,
+            deps: runtimeDeps,
             onChange: { [weak self] in self?.syncFromRuntime(id) }
         )
         runtimes[id] = runtime
@@ -254,7 +259,7 @@ final class AccountsViewModel: ObservableObject {
     private func backfillIdentity(_ id: UUID) async {
         defer { identityBackfillInFlight.remove(id) }
         guard let token = try? credentials.credentials(for: id)?.accessToken,
-              let identity = try? await ProfileService.fetchIdentity(token: token) else { return }
+              let identity = try? await deps.fetchIdentity(token) else { return }
 
         let result = AccountIdentityResolver.backfill(accounts, id: id,
                                                       uuid: identity.uuid, email: identity.email)
@@ -376,14 +381,7 @@ final class AccountsViewModel: ObservableObject {
     // MARK: - Notifications
 
     private func requestNotificationAuthorization() async {
-        let center = UNUserNotificationCenter.current()
-        _ = try? await center.requestAuthorization(options: [.alert, .sound])
-        notificationsAuthorized = await Self.isNotificationAuthorized()
-    }
-
-    private nonisolated static func isNotificationAuthorized() async -> Bool {
-        let settings = await UNUserNotificationCenter.current().notificationSettings()
-        return settings.authorizationStatus == .authorized
+        notificationsAuthorized = await deps.requestNotificationAuthorization()
     }
 
     private nonisolated func sendNotification(account: Account, crossing: ThresholdTracker.Crossing) {
