@@ -45,6 +45,28 @@ struct KeychainServiceParseTests {
     }
 }
 
+// MARK: - CachedCredentials refresh expiry
+
+@Suite("CachedCredentials refresh expiry")
+struct CachedCredentialsExpiry {
+    @Test("Legacy payload without refreshTokenExpiresAt decodes with nil")
+    func legacyDecodes() throws {
+        let legacy = #"{"accessToken":"a","refreshToken":"r"}"#
+        let creds = try JSONDecoder().decode(CachedCredentials.self, from: Data(legacy.utf8))
+        #expect(creds.refreshTokenExpiresAt == nil)
+        #expect(creds.accessToken == "a")
+    }
+
+    @Test("Round-trips a set refreshTokenExpiresAt")
+    func roundTrips() throws {
+        let when = Date(timeIntervalSince1970: 1_760_000_000)
+        let creds = CachedCredentials(accessToken: "a", refreshToken: "r", expiresAt: nil, refreshTokenExpiresAt: when)
+        let data = try JSONEncoder().encode(creds)
+        let back = try JSONDecoder().decode(CachedCredentials.self, from: data)
+        #expect(back.refreshTokenExpiresAt == when)
+    }
+}
+
 // MARK: - CachedCredentials Codable
 
 @Suite("CachedCredentials Codable")

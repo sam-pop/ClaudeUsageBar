@@ -5,6 +5,10 @@ struct CachedCredentials: Codable, Equatable {
     var accessToken: String
     var refreshToken: String?
     var expiresAt: Date?
+    /// Expiry of the refresh token itself (Anthropic's refresh tokens carry a rolling
+    /// ~28-day expiry). Optional so previously-persisted payloads without this field still
+    /// decode. Default lets existing call sites keep compiling unchanged.
+    var refreshTokenExpiresAt: Date? = nil
 
     /// Whether the access token has expired or will within `leeway`. Tokens without a
     /// known expiry (`expiresAt == nil`) never report as needing a proactive refresh —
@@ -119,13 +123,15 @@ enum KeychainService {
             let access_token: String
             let refresh_token: String?
             let expires_in: Int?
+            let refresh_token_expires_in: Int?
         }
         let decoded = try JSONDecoder().decode(RefreshResponse.self, from: data)
 
         return CachedCredentials(
             accessToken: decoded.access_token,
             refreshToken: decoded.refresh_token ?? refreshToken,
-            expiresAt: decoded.expires_in.map { Date().addingTimeInterval(TimeInterval($0)) }
+            expiresAt: decoded.expires_in.map { Date().addingTimeInterval(TimeInterval($0)) },
+            refreshTokenExpiresAt: decoded.refresh_token_expires_in.map { Date().addingTimeInterval(TimeInterval($0)) }
         )
     }
 
