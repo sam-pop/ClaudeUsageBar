@@ -87,3 +87,77 @@ struct OAuthLoginService {
         return try OAuthExchange.credentials(fromStatus: http.statusCode, body: data)
     }
 }
+
+extension OAuthLoginService {
+    /// How long the loopback listener waits for the browser's redirect before giving up and
+    /// resuming its wait with `nil`. A caller does not choose this later — see `begin` below
+    /// for why the wait is already running by the time it gets a value back.
+    static let loopbackTimeout: TimeInterval = 600
+
+    /// Starts a browser OAuth login: generates fresh PKCE and decides loopback-vs-paste mode
+    /// BEFORE any browser opens. `redirectURI` is bound here and replayed byte-identically at
+    /// token exchange, so the mode is fixed for the life of this login — a later timeout does
+    /// not switch modes, it restarts as a brand-new login (a fresh call to this method).
+    ///
+    /// `forcePaste: true` always selects paste mode: no server, `redirectURI =
+    /// OAuthEndpoints.pasteRedirect`. Otherwise a `LoopbackServer` is started; on success the
+    /// mode is `.loopback(port:)` with the `127.0.0.1` (not `localhost`) redirect — `LoopbackServer`
+    /// binds IPv4 loopback only, and pinning the literal avoids a `localhost` resolution to
+    /// `::1` hitting connection-refused. A `StartError.bindFailed` falls back to paste mode
+    /// instead of throwing: a fresh login always produces *some* usable mode. Any other error
+    /// from `start()` (none is currently possible, per its own contract) propagates instead of
+    /// being silently treated as a fallback.
+    ///
+    /// Ordering hazard this exists to prevent: `LoopbackServer.waitForCallback` must be armed
+    /// before the browser can deliver its redirect, or the arriving callback is answered 404
+    /// like any stray request, silently burning the single-use code. Rather than leave that
+    /// sequencing to the caller, this method itself starts the wait — as a concurrent `Task` —
+    /// before returning, so it is already armed by the time the caller has anything in hand to
+    /// open a browser with. For loopback mode, the caller's only remaining job is to open
+    /// `authorizeURL` and then `await` the returned `callback` for the resulting code (`nil` on
+    /// timeout or `server.stop()`). Do **not** call `server.waitForCallback` again yourself —
+    /// `LoopbackServer` allows exactly one waiter per login, so a second call returns `nil`
+    /// immediately, indistinguishable from an instant timeout.
+    ///
+    /// `authorizeURL` is built with `loginHintEmail: nil`: this method only receives an account
+    /// id, not an email. A caller that knows the account's email and wants it preselected
+    /// should build its own URL via `pending.authorizeURL(loginHintEmail:)` instead of using
+    /// the one returned here.
+    ///
+    /// Never log or print `authorizeURL` — it carries the PKCE code challenge (and, for a
+    /// caller-built URL with a hint, a real email address).
+    func begin(
+        accountID: UUID?,
+        forcePaste: Bool,
+        now: () -> Date = Date.init,
+        makeServer: () -> LoopbackServer = { LoopbackServer() }
+    ) async throws -> (
+        pending: PendingLogin, authorizeURL: URL, server: LoopbackServer?, callback: Task<String?, Never>?
+    ) {
+        let pkce = OAuthPKCE.generate()
+
+        func paste() -> (pending: PendingLogin, authorizeURL: URL, server: LoopbackServer?, callback: Task<String?, Never>?) {
+            let pending = PendingLogin(
+                accountID: accountID, mode: .paste, pkce: pkce,
+                redirectURI: OAuthEndpoints.pasteRedirect, startedAt: now())
+            return (pending, pending.authorizeURL(loginHintEmail: nil), nil, nil)
+        }
+
+        guard !forcePaste else { return paste() }
+
+        let server = makeServer()
+        let port: UInt16
+        do {
+            port = try await server.start()
+        } catch LoopbackServer.StartError.bindFailed {
+            return paste()
+        }
+
+        let pending = PendingLogin(
+            accountID: accountID, mode: .loopback(port: port), pkce: pkce,
+            redirectURI: "http://127.0.0.1:\(port)/callback", startedAt: now())
+        let expectedState = pkce.state
+        let callback = Task { await server.waitForCallback(expectedState: expectedState, timeout: Self.loopbackTimeout) }
+        return (pending, pending.authorizeURL(loginHintEmail: nil), server, callback)
+    }
+}
