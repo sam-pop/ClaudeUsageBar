@@ -41,10 +41,10 @@ final class AccountsViewModel: ObservableObject {
     /// per-account entries.
     @Published var addLoginState: LoginState = .idle
 
-    /// Injected seam for this coordinator's system-touching work: the browser OAuth flow
-    /// plus the one-time legacy migration's keychain/filesystem calls. Kept separate from
-    /// `AccountRuntime.Dependencies` — that type owns per-account refresh I/O, this owns
-    /// coordinator-level I/O.
+    /// The single injection point for every system-touching operation this coordinator
+    /// performs, or hands down to the `AccountRuntime`s it owns: the browser OAuth flow,
+    /// identity lookups, usage fetch and token refresh, notification authorization and
+    /// posting, the legacy migration's keychain/filesystem calls, and the clock.
     struct Dependencies: Sendable {
         var beginLogin: @Sendable (_ accountID: UUID?, _ forcePaste: Bool, _ loginHintEmail: String?) async throws
             -> (pending: PendingLogin, authorizeURL: URL, server: LoopbackServer?, callback: Task<String?, Never>?)
@@ -60,10 +60,15 @@ final class AccountsViewModel: ObservableObject {
         /// item, once migration has verified the new copy landed. A test double must not
         /// touch the real keychain or filesystem; recording the call is the point.
         var deleteLegacyArtifacts: @Sendable () -> Void
-        /// Requests notification authorization and reports whether it's granted, or `nil`
-        /// if the request couldn't be completed. A test double must not touch
-        /// `UNUserNotificationCenter` at all — return `nil`.
+        /// Requests notification authorization and reports whether it's granted. A test
+        /// double must not touch the real `UNUserNotificationCenter`; return `nil`,
+        /// `true`, or `false` to drive whatever `notificationsAuthorized` state the test
+        /// needs.
         var requestNotificationAuthorization: @Sendable () async -> Bool?
+        /// Posts one already-built notification request. A test double must not touch
+        /// the real `UNUserNotificationCenter` — recording the call (or doing nothing) is
+        /// the point.
+        var addNotification: @Sendable (UNNotificationRequest) -> Void
         /// Fetches usage for one account's access token. Threaded into every attached
         /// `AccountRuntime.Dependencies` so a test controls it instead of hitting the
         /// real API.
@@ -75,9 +80,9 @@ final class AccountsViewModel: ObservableObject {
 
         /// Wires the real `OAuthLoginService`, `ProfileService`, `NSWorkspace` browser
         /// opener, `UsageAPIService`/`KeychainService` usage-refresh calls, notification
-        /// authorization, and the legacy-migration keychain/filesystem calls this view
-        /// model used to hardcode. Builds closures only — none of them run until the view
-        /// model calls one, so constructing `.live` performs no I/O.
+        /// authorization and posting, and the legacy-migration keychain/filesystem calls
+        /// this view model used to hardcode. Builds closures only — none of them run
+        /// until the view model calls one, so constructing `.live` performs no I/O.
         static var live: Dependencies {
             Dependencies(
                 beginLogin: { accountID, forcePaste, loginHintEmail in
@@ -105,6 +110,7 @@ final class AccountsViewModel: ObservableObject {
                     let settings = await center.notificationSettings()
                     return settings.authorizationStatus == .authorized
                 },
+                addNotification: { UNUserNotificationCenter.current().add($0) },
                 fetchUsage: { try await UsageAPIService.fetch(token: $0) },
                 refreshToken: { creds in
                     guard let refreshToken = creds.refreshToken else {
@@ -401,6 +407,6 @@ final class AccountsViewModel: ObservableObject {
             content: content,
             trigger: nil
         )
-        UNUserNotificationCenter.current().add(request)
+        deps.addNotification(request)
     }
 }
