@@ -10,9 +10,9 @@ enum UsageAPIError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .noToken:
-            return "Not signed in — click Log in"
+            return "No login stored — log in again"
         case .tokenExpired:
-            return "Login expired — click Log in again"
+            return "Login expired — log in again"
         case .requestFailed(let error):
             return "Request failed: \(error.localizedDescription)"
         case .invalidResponse(let code):
@@ -27,7 +27,7 @@ enum UsageAPIError: LocalizedError {
         return false
     }
 
-    var needsKeychainRefresh: Bool {
+    var needsReLogin: Bool {
         switch self {
         case .noToken, .tokenExpired: return true
         default: return false

@@ -131,6 +131,12 @@ struct KeychainMigrationTests {
         // Round-trip verification failed, so the only surviving copy (the file) must remain.
         #expect(FileManager.default.fileExists(atPath: legacyURL.path))
     }
+
+    @Test("Empty store + no legacy file → nil (no Claude Code keychain fallback)")
+    func noClaudeCodeFallback() {
+        KeychainService.store = InMemoryCredentialStore()          // empty
+        #expect(KeychainService.getCredentials(legacyFileURL: tempLegacyURL()) == nil)
+    }
 }
 
 // MARK: - CachedCredentials.needsRefresh
@@ -173,7 +179,7 @@ struct CachedCredentialsNeedsRefreshTests {
 @Suite("UsageAPIError classification")
 struct UsageAPIErrorTests {
 
-    @Test("Auth, transient, and keychain-refresh flags are correct")
+    @Test("Auth, transient, and re-login flags are correct")
     func classification() {
         // 401/403 are auth errors, not transient.
         #expect(UsageAPIError.invalidResponse(401).isAuthError)
@@ -191,9 +197,9 @@ struct UsageAPIErrorTests {
         // Network failures are transient.
         #expect(UsageAPIError.requestFailed(URLError(.timedOut)).isTransient)
 
-        // noToken / tokenExpired need a keychain refresh.
-        #expect(UsageAPIError.noToken.needsKeychainRefresh)
-        #expect(UsageAPIError.tokenExpired.needsKeychainRefresh)
-        #expect(!UsageAPIError.invalidResponse(500).needsKeychainRefresh)
+        // noToken / tokenExpired need a re-login.
+        #expect(UsageAPIError.noToken.needsReLogin)
+        #expect(UsageAPIError.tokenExpired.needsReLogin)
+        #expect(!UsageAPIError.invalidResponse(500).needsReLogin)
     }
 }

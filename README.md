@@ -44,8 +44,7 @@ Or just `make run` to build and launch without installing.
 
 1. **Launch the app** — appears in your menu bar, empty
 2. Click the menu bar icon, then **Add account…** — approve the sign-in in the browser tab that opens
-3. **Allow Keychain access** — click **Always Allow** if prompted the first time (see [Troubleshooting](#troubleshooting))
-4. **Allow notifications** — for usage threshold alerts
+3. **Allow notifications** — for usage threshold alerts
 
 ## Multiple accounts
 
@@ -55,9 +54,9 @@ Add as many Claude accounts as you like, one login at a time:
 2. A browser tab opens to claude.ai; sign in and approve. If it's already signed into the wrong account, use **Copy link** to open the sign-in URL in a browser window or profile that's signed into the one you want, instead of starting over.
 3. Once approved, the app fetches that account's identity and starts tracking it independently. Repeat for further accounts.
 
-If the app can't run a local callback server (e.g. it's blocked by a firewall), the login falls back to a page on claude.ai that shows a `code#state` string — paste that back into the popover to finish.
+If the app can't run a local callback server (e.g. it's blocked by a firewall), the login falls back immediately to a page on console.anthropic.com that shows a `code#state` string — paste that back into the popover to finish.
 
-Each account is identified by its Anthropic account ID (fetched from the OAuth profile endpoint), so the app auto-labels it and **won't add the same account twice** — signing into an account you already track just refreshes its login instead of creating a duplicate. Re-authing a dead login is identity-guarded: the app checks that the browser session which just signed in matches the account being re-authed before overwriting anything.
+Each account is identified by its Anthropic account ID (fetched from the OAuth profile endpoint), so the app auto-labels it and **won't add the same account twice** — signing into an account you already track just refreshes its login instead of creating a duplicate. Re-authing a dead login is identity-guarded once the app has learned that account's identity: it checks that the browser session which just signed in matches the account being re-authed before overwriting anything.
 
 In the popover, each account has a **✎** to rename it and set a custom **menu-bar prefix** (the `P` / `W` letters — override with anything, e.g. `Me` or `🏠`), and a **🗑** to remove it. Prefixes are auto-derived from labels and de-duplicated when they'd collide.
 
@@ -114,7 +113,7 @@ claude.ai / console.anthropic.com   │
 
 **Credential storage.** All accounts' credentials live in a **single** app-owned Keychain item (`com.sam.ClaudeUsageBar`) whose payload is a JSON map keyed by account ID. One Keychain item means one access-control entry (not one per account) and no orphaned items. Writes are done as a verified read-modify-write of a single slot, and a present-but-unreadable item (e.g. after a code-signature change) is never overwritten — so a locked or ACL-broken Keychain can't wipe your other accounts. On upgrade from an older single-account build, the existing credentials are migrated into this map (and the legacy item/plaintext cache deleted) only **after** the new copy is verified to have persisted.
 
-**Token refresh.** Each account's access token is refreshed **proactively** before it expires using that account's own stored refresh token — no Keychain prompt for a routine refresh. A **reactive** refresh on a 401/403 is the safety net. A per-account circuit breaker only trips on genuine token rejections (400/401/403); network blips, 429s, and 5xx don't count, so a flaky connection never strands an account. Anthropic's refresh tokens carry a rolling ~28-day expiry, so a login that sits unused for about that long stops refreshing; the popover surfaces this with a **Log in again** control, and re-authing is identity-guarded — the app checks the browser login's account against the one being re-authed before overwriting anything.
+**Token refresh.** Each account's access token is refreshed **proactively** before it expires using that account's own stored refresh token — no Keychain prompt for a routine refresh. A **reactive** refresh on a 401/403 is the safety net. A per-account circuit breaker only trips on genuine token rejections (400/401/403); network blips, 429s, and 5xx don't count, so a flaky connection never strands an account. Anthropic's refresh tokens carry a rolling ~28-day expiry, so a login that sits unused for about that long stops refreshing; the popover surfaces this with a **Log in again** control, and re-authing is identity-guarded once the app has learned the account's identity — it checks the browser login's account against the one being re-authed before overwriting anything.
 
 **Resilience.** Transient failures (network errors, HTTP 5xx) are retried with exponential backoff (3 attempts, ~1s / 2s / 4s, jittered).
 
@@ -130,8 +129,8 @@ claude.ai / console.anthropic.com   │
 | **Configurable thresholds** | Defaults to 80% and 90%; override via `defaults` (see below) |
 | **Single-item Keychain store** | All accounts in one app-owned Keychain item; verified writes never clobber other accounts |
 | **Independent token refresh** | Each account refreshes proactively before expiry; reactive 401/403 fallback; breaker trips only on real rejections |
-| **Identity-guarded re-auth** | Re-authing a dead login verifies the browser signed into the right account before overwriting anything |
-| **Exponential backoff** | Retries transient errors with jittered backoff; auth errors take the re-login path |
+| **Identity-guarded re-auth** | Re-authing a dead login verifies the browser signed into the right account before overwriting anything, once its identity is known |
+| **Exponential backoff** | Retries transient errors with jittered backoff; auth errors take the token-refresh path |
 | **24h sparkline** | Per account; samples every 5min, up to 288 points |
 | **Namespaced persistence** | Last data + history saved per account in UserDefaults |
 | **Graceful errors** | Shows stale data + error banner instead of a blank screen |
@@ -216,10 +215,10 @@ CI runs the same build + test on every push and pull request (see the badge abov
 
 | Problem | Fix |
 |---------|-----|
-| "Login expired — usage can't refresh." on an account | Anthropic's refresh tokens carry a rolling ~28-day expiry — a login left unused for about that long stops refreshing. Click **Log in again** in that account's popover section to redo it in the browser (re-auth is identity-guarded and refuses a mismatched login). |
-| "Not signed in — click Log in" | Click **Add account…** (or **Log in again** for an existing account) and approve the sign-in in the browser tab that opens. |
+| "Login expired — usage can't refresh." on an account | Anthropic's refresh tokens carry a rolling ~28-day expiry — a login left unused for about that long stops refreshing. Click **Log in again** in that account's popover section to redo it in the browser (re-auth is identity-guarded, once the account's identity is known, and refuses a mismatched login). |
+| "No login stored — log in again" | Click **Add account…** (or **Log in again** for an existing account) and approve the sign-in in the browser tab that opens. |
 | The browser that opened is signed into the wrong Claude account | Use **Copy link** to open the sign-in URL in a browser window or profile that's signed into the account you meant, instead of starting the login over. |
-| Browser doesn't return to the app after signing in | The app listens on a local port for the callback; if that's blocked (e.g. a firewall), it falls back automatically to a page that shows a `code#state` string — paste that into the popover, or click **Use a code instead** to switch to that mode manually. |
+| Browser doesn't return to the app after signing in | The app waits up to about ten minutes for the local callback. If it never arrives, it automatically restarts the login in paste mode — reopening the browser for a fresh approval on a console.anthropic.com page that shows a `code#state` string to paste back into the popover (a notification tells you when this happens). Click **Use a code instead** to switch to paste mode immediately instead of waiting. |
 | "Finish the login in progress first." | Only one login runs at a time across the whole app. Cancel the one shown in the popover (or remove the account holding it) before starting another. |
 | Keychain prompt / an account needs re-adding after rebuilding from source | With ad-hoc signing (`CODE_SIGN_IDENTITY = "-"`), the app-owned Keychain item is bound to the previous build's code signature, so a rebuilt binary may not be able to read it. Re-add the affected account via **Add account…** / **Log in again**. |
 | Repeated prompts while iterating locally | Sign with a stable, free **"Apple Development"** identity instead of ad-hoc signing so the item's ACL stays valid across rebuilds. |

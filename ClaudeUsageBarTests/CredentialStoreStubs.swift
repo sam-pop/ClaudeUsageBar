@@ -46,7 +46,7 @@ final class NonPersistingAccountCredentialStore: AccountCredentialStoring, @unch
 
 /// A store whose `loadAll` always throws `authFailed` (ACL broken / keychain locked).
 /// `save` records whether it was ever reached — the invariant under test is that it is
-/// NOT, so a re-capture-less mutation can never wipe the surviving accounts.
+/// NOT, so a login-less mutation can never wipe the surviving accounts.
 final class AuthFailedAccountCredentialStore: AccountCredentialStoring, @unchecked Sendable {
     private(set) var saveWasCalled = false
     func loadAll() throws -> [UUID: CachedCredentials] { throw AccountCredentialStoreError.authFailed }

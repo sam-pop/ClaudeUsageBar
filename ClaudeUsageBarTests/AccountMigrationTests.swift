@@ -126,25 +126,4 @@ struct AccountMigrationTests {
         #expect(accounts.isEmpty)
         #expect(AccountsStore(defaults: defaults).hasAccounts)   // marked migrated (won't retry every launch)
     }
-
-    @Test("""
-    Pre-1.2 upgrader whose only credential copy lived in Claude Code's own keychain item: \
-    `resolveLegacyCredentials` no longer falls back to it (that KeychainService step was \
-    removed), so this now lands in the empty state and logs in via the browser instead of \
-    silently auto-migrating
-    """)
-    func noClaudeCodeFallback() throws {
-        let defaults = ephemeralDefaults()   // no accounts.v1 key: never launched before
-        let credStore = InMemoryAccountCredentialStore()   // no app-owned credential map either
-        // `resolveLegacyCredentials` returning nil stands in for the removed fallback: the app
-        // item and the legacy plaintext file are both empty, and there is no third place left
-        // to look.
-        let migration = makeMigration(defaults: defaults, credentialStore: credStore, legacyCreds: nil)
-
-        let accounts = migration.run()
-
-        #expect(accounts.isEmpty)   // no crash, no silent migration from Claude Code's keychain
-        #expect(try credStore.loadAll().isEmpty)
-        #expect(AccountsStore(defaults: defaults).hasAccounts)   // marked migrated; browser login is next
-    }
 }
