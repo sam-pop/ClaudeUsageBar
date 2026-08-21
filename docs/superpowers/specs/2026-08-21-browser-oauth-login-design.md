@@ -94,7 +94,9 @@ enum Mode { case loopback(port: UInt16), paste }
 ### `LoopbackServer`
 
 - Binds the loopback interface only; port 0 (OS-assigned) unless S3 forces otherwise; redirect URI uses the `127.0.0.1` literal if allowlisted (kills `localhost`→`::1` resolution flakes), else `localhost` + bind both stacks.
-- **Serves until satisfied or timeout (10 min):** accepts connections in a loop; only `GET /callback` with non-empty `code` AND `state` equal to the pending login's completes the flow. Everything else (favicon, preconnect, port scans) → `404`, keep listening. Completion → static 200 page ("Logged in — you can close this tab"), then shutdown. At timeout the listener stops accepting completions but keeps serving a static "login expired — try again from the app" page for a 10-minute grace period before shutting down (a late browser redirect must not land on connection-refused).
+- **Serves until satisfied or timeout (10 min):** accepts connections in a loop; only `GET /callback` with non-empty `code` AND `state` equal to the pending login's completes the flow. Everything else (favicon, preconnect, port scans) → `404`, keep listening. Completion → static 200 page ("Logged in — you can close this tab"), then shutdown. At timeout the listener stops accepting completions and switches to a static "login expired — try again from the app" page.
+
+**AS SHIPPED (amended after the final review — the original promise below was not met):** the grace period is effectively **milliseconds, not 10 minutes**. `LoopbackServer` still implements the grace machinery, but the server-lifetime invariant adopted in §4a stops the listener as soon as the timeout wait returns, so in production a late browser redirect gets connection-refused rather than the expired page. That was the accepted cost of making leak-freedom structural (see §4a); the grace code is now exercised only by tests and is a candidate for later simplification. This paragraph documents shipped behavior; the sentence above describes the component in isolation.
 - Response: `Cache-Control: no-store`, `Connection: close`, body contains **no** request-derived content.
 
 ### `AccountsViewModel` wiring
@@ -114,7 +116,9 @@ enum Mode { case loopback(port: UInt16), paste }
 | `exchangeRejected` (bad/expired/reused code) | "Login expired or was already used — try again." | Restart flow. |
 | `identityFetchFailed` (network/5xx; token is seconds old, so never auth) | "Logged in, but couldn't verify the account — Retry." | Pending grant kept **in memory**; Retry re-runs only the identity step. |
 | `identityMismatch(actualEmail)` | "That browser is signed into *actual* — expected *label*." + "Copy login link" (paste into the right profile) | Mismatched grant is **dropped, never persisted** (known cost: it stays live server-side; revocation out of scope). |
-| `credentialSaveFailed` (keychain `authFailed`/OSStatus) | "Logged in, but couldn't store it — keychain item unreadable." + **Reset stored logins** (deletes the app's keychain item, marks every account needs-login) | The one path where re-login genuinely can't help; must never be silent. |
+| `credentialSaveFailed` (keychain `authFailed`/OSStatus) | "Couldn't store the login — the keychain refused it." | The one path where re-login genuinely can't help; must never be silent. |
+
+> **DESCOPED, recorded after the final review:** the **Reset stored logins** control named in the original row was never planned into a task and is **not shipped**. Consequence a user can hit: with a persistently unwritable keychain item (e.g. the ad-hoc re-signing case the README describes), the message is accurate but every in-app action loops — Try again hits the same store failure, and so does Add account. Recovery today is manual: delete the app's keychain item in Keychain Access, or re-sign the app. This is strictly better than the pre-branch behavior (which failed silently), so it did not block the merge — but it is follow-up #1. Do not let this row read as shipped.
 | Identity-less migrated account (`accountUUID == nil`) | Backfill runs the existing `AccountIdentityResolver` dedupe; a duplicate merges credentials into the existing slot (models `addCurrentAccount`'s current dedupe) instead of converting the column into a copy. |
 
 ### UI
@@ -148,7 +152,15 @@ enum Mode { case loopback(port: UInt16), paste }
 - Listener: loopback bind only; validates method+path+state before completing; static responses; no request material ever reflected.
 - Never logged/rendered: tokens, codes, verifiers, the authorize URL (contains `login_hint` email), or raw HTTP response bodies. `KeychainServiceError.refreshFailed(status:body:)` must never gain a `LocalizedError` conformance that surfaces `body` (today `state = .error(...)` renders error text in the popover).
 - Wrong-account grants are dropped from the app (never persisted). **Revocation is not available for this client (S10):** a dropped or removed grant stays valid server-side until it ages out (~28 days). Accepted, documented limitation — the app minimizes exposure by requesting only `user:profile user:inference` (no api-key scope) and by keeping stored tokens in the existing keychain map.
-- Tokens persist only via the existing single-item keychain map store; save failures surface (§4 taxonomy), never `try?`.
+- Tokens persist only via the existing single-item keychain map store. Save failures surface (§4 taxonomy), never `try?` — **scoped to the login path as shipped.** The *refresh* path (`AccountRuntime.tryTokenRefresh`) still uses `try?` on its credential write; that is pre-existing, judged Important-not-blocking by two reviews (a persistent keychain failure bails earlier at `fetchWithRetry`'s read, so it only bites on transient degradation mid-cycle), and is follow-up #3.
+
+## 10. Follow-ups after merge (from the final whole-branch review, in order)
+
+1. **A "Reset stored logins" control**, or an explicit product decision to live without it. See the descope note in §4 — without it, a persistently unwritable keychain is an in-app dead loop.
+2. **Two cheap regression tests for properties currently held only by code review:** (a) the loopback listener binds IPv4 loopback ONLY — deleting `requiredLocalEndpoint` passes all 196 tests today, and it is the listener's single biggest security property (proposed test: after `start()`, try binding a POSIX socket to `<en0-IP>:port`; it succeeds only if the server wrongly took the wildcard); (b) the **mandatory `User-Agent` header** on the token endpoint — the spike's most load-bearing discovery, whose absence yields a Cloudflare 429, is enforced today only by a comment, so a refactor dropping it ships green and fails live. A `URLProtocol` stub asserting the header closes it.
+3. **One ~10-line hardening of `AccountRuntime.tryTokenRefresh`:** replace `try?` with `do/catch` and a surfaced non-fatal flag; add the epoch guard (this write is a fourth post-await mutation that Task 10's epoch fix missed because it lives one function deeper, so a stale timer tick can overwrite a fresh browser login's credentials with old-family ones); and drop `KeychainServiceError.refreshFailed`'s raw-body associated value, which is unrenderable today but is needless hygiene debt.
+
+**Open product question for the owner:** on a loopback timeout the app auto-opens a NEW browser authorize page ~10 minutes after the user last interacted, with the popover closed. A notification now announces it, but parking in the paste state and opening the page only on an explicit click would be calmer. Deliberately left as-is pending a decision.
 
 ## 7a. Known limitation: 403 is ambiguous (accepted, with a revisit trigger)
 
