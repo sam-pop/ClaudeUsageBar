@@ -748,9 +748,13 @@ And in `tryTokenRefresh`, before `credentials.update`, if `refreshed.refreshToke
   - `.waitingForBrowser` → "Waiting for browser…" + Cancel + "Copy link" (writes `pending.authorizeURL` to `NSPasteboard`) + "Use a code instead" (→ `cancelLogin` then `beginLogin` restart forcing paste — expose a `beginLogin(accountID, forcePaste:)` or a `switchToPaste()`)
   - `.awaitingPaste` → a `TextField` + Submit → `Task { await viewModel.submitPaste($0) }`
   - `.failed(msg)` → red inline text + "Try again"
+  - **`identityFetchFailed` must expose Retry AND Cancel** (from the Task 9 review). While that state holds the pending login, a fresh click on the pill is silently refused by the one-login-at-a-time rule — so without both affordances the user is soft-locked with a dead-looking pill. Retry re-runs only the identity step; Cancel releases the pending login.
+  - **Clear a stale cross-account refusal message.** "Finish the login in progress first." is written onto a *different* account's state and is never cleared when the pending login ends — it lingers until that account starts its own login. Clear it when the pending login terminates.
+  - **Copy fix:** "keychain unreadable" also fires for a write failure, where "unreadable" is the wrong diagnosis. Lead with "Couldn't store the login" and let the detail follow.
 - [ ] **Step 2:** Render `LoginPill` in `UsageMatrixView.freshness` (replacing the `needsReAuth` branch at `:100-106`) **and** in `AccountRowView` — hoisted above the `snapshot == nil` check so a stale snapshot still shows it (Spec §1.4). Add a `needsReAuth`-driven banner in `AccountRowView` independent of `.error`.
 - [ ] **Step 3:** `UsagePopoverView`: "Add current account" → "Add account…" → `Task { await viewModel.beginLogin(nil) }`; empty-state copy no longer mentions Claude Code (Task 12).
-- [ ] **Step 4:** Notifications: in `beginLogin` success/failure, post via the existing `UNUserNotificationCenter` path (mirror `sendNotification`) — "\(label) login refreshed ✓" / a short failure reason — so the outcome is visible after the popover has closed.
+- [ ] **Step 4:** Notifications: post via `deps.addNotification` (the seam, not `UNUserNotificationCenter` directly) — "\(label) login refreshed ✓" on success.
+  - **FAILURE notifications are missing and must be added here** (flagged by the Task 9 implementer). Task 9 posts success only, so a login that fails while the popover is closed — which is the normal case, since the popover closes the moment the browser takes focus — is completely invisible. The user stares at a browser tab and never learns the app rejected it. Post a short failure reason for every terminal failure state except cancellation (the user cancelled on purpose; stay silent there).
 - [ ] **Step 5:** Manual QA build: `make install`; real loopback login for the personal account, watch the pill go idle + notification. Commit — `feat: browser-login UI (pill, paste, both layouts, notifications)`
 
 ---
