@@ -18,6 +18,11 @@ struct AccountRowView: View {
 
             if isEditing { editor }
 
+            // Above the snapshot check on purpose: a dead login usually leaves the last
+            // snapshot in place, so gating this on `snapshot == nil` hid the only way back in
+            // behind an "Updated 3h ago" line that looked healthy.
+            LoginPill(viewModel: viewModel, accountID: account.id)
+
             if let snapshot = accountView.snapshot {
                 usageSections(snapshot)
                 if let limits = snapshot.modelLimits, !limits.isEmpty {
@@ -136,24 +141,14 @@ struct AccountRowView: View {
         }
     }
 
+    /// The refresh error only. Anything to do with logging back in is `LoginPill`'s, hoisted
+    /// out of this banner so it shows whether or not there's a snapshot.
     private func errorBanner(_ message: String) -> some View {
-        VStack(spacing: 6) {
-            HStack(spacing: 6) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 10)).foregroundStyle(.orange)
-                Text(message).font(.caption2).foregroundStyle(.secondary).lineLimit(3)
-                Spacer(minLength: 4)
-            }
-            if viewModel.needsReAuth[account.id] == true {
-                Button {
-                    Task { await viewModel.beginLogin(account.id) }
-                } label: {
-                    Label("Re-read from Claude Code", systemImage: "key.fill")
-                        .font(.system(size: 10, weight: .medium))
-                }
-                .controlSize(.mini).buttonStyle(.borderedProminent)
-                .help("Make sure Claude Code is logged into THIS account first")
-            }
+        HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 10)).foregroundStyle(.orange)
+            Text(message).font(.caption2).foregroundStyle(.secondary).lineLimit(3)
+            Spacer(minLength: 4)
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)

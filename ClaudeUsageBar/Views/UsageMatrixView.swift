@@ -68,7 +68,6 @@ struct UsageMatrixView: View {
 
     private func headerCell(_ column: AccountsViewModel.AccountView, index: Int, now: Date) -> some View {
         let account = column.account
-        let needsReAuth = viewModel.needsReAuth[account.id] == true
         return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 5) {
                 Circle().fill(AccountColor.color(forIndex: index)).frame(width: 7, height: 7)
@@ -88,7 +87,7 @@ struct UsageMatrixView: View {
             if let email = account.email, email != account.label {
                 Text(email).font(.system(size: 9)).foregroundStyle(.tertiary).lineLimit(1)
             }
-            freshness(column, needsReAuth: needsReAuth, now: now)
+            freshness(column, now: now)
         }
         .padding(.horizontal, 10).padding(.vertical, 9)
         .frame(width: Self.columnWidth, alignment: .leading)
@@ -96,14 +95,11 @@ struct UsageMatrixView: View {
     }
 
     @ViewBuilder
-    private func freshness(_ column: AccountsViewModel.AccountView, needsReAuth: Bool, now: Date) -> some View {
-        if needsReAuth {
-            Button {
-                Task { await viewModel.beginLogin(column.account.id) }
-            } label: {
-                pill(text: "Refresh login", systemImage: "key.slash.fill", tint: .red)
-            }
-            .buttonStyle(.plain).help("Make sure Claude Code is logged into THIS account first")
+    private func freshness(_ column: AccountsViewModel.AccountView, now: Date) -> some View {
+        // A login that needs starting — or one already running — replaces the freshness line:
+        // how stale the numbers are matters less than the fact that they've stopped updating.
+        if viewModel.loginAffordance(for: column.account.id) != .none {
+            LoginPill(viewModel: viewModel, accountID: column.account.id, layout: .compact)
         } else if let snapshot = column.snapshot {
             let stale = now.timeIntervalSince(snapshot.fetchedAt) > 300
             let ago = UsageFormatting.lastUpdatedText(since: snapshot.fetchedAt, now: now)

@@ -437,6 +437,96 @@ struct AccountsViewModelBrowserLoginTests {
         #expect(script.beginCalls.count == 1)
     }
 
+    @Test("The “finish the login in progress” refusal clears when that login ends")
+    func busyNoticeClearsWhenThePendingLoginEnds() async {
+        let script = Script()
+        script.beginPaste = true   // parks in .awaitingPaste with a live pending login
+
+        let work = Account(label: "Work", accountUUID: "acct-A")
+        let personal = Account(label: "Personal", accountUUID: "acct-B")
+        let vm = makeVM(script, accounts: [work, personal], store: InMemoryAccountCredentialStore())
+
+        await vm.beginLogin(work.id)
+        await vm.beginLogin(personal.id)
+        #expect(failureMessage(vm.loginState[personal.id], "refusal").contains("Finish the login"))
+
+        await vm.cancelLogin()
+
+        // The refusal is written onto whichever account was clicked second, so nothing that
+        // account does clears it: left in place it sits there as that account's own failure.
+        #expect(vm.loginState[personal.id] == .idle)
+        #expect(vm.loginAffordance(for: personal.id) == LoginAffordance.none)
+        #expect(vm.loginState[work.id] == .idle)
+    }
+
+    @Test("The authorize URL is exposed while a login is pending, for Copy link, and dropped after")
+    func authorizeURLIsExposedForCopying() async {
+        let script = Script()
+        script.beginPaste = true
+
+        let account = Account(label: "Work", accountUUID: "acct-A")
+        let vm = makeVM(script, accounts: [account], store: InMemoryAccountCredentialStore())
+
+        await vm.beginLogin(account.id)
+        // Exactly the URL handed to the browser — the point is opening the same login
+        // somewhere else, not rebuilding a new one.
+        #expect(vm.pendingAuthorizeURL == URL(string: "https://claude.ai/oauth/authorize"))
+
+        await vm.cancelLogin()
+        #expect(vm.pendingAuthorizeURL == nil)
+    }
+
+    @Test("Use a code instead: the loopback listener is torn down and the login restarts in paste mode")
+    func switchToPasteRestartsTheLogin() async throws {
+        let script = Script()
+        let server = LoopbackServer()
+        let port = try await server.start()
+
+        // A real listener, so the switch can be shown to actually release the port — a
+        // restart that leaves the old server bound is the bug this path invites.
+        var deps = makeDeps(script)
+        let pkce = script.pkce
+        let url = URL(string: "https://claude.ai/oauth/authorize")!
+        deps.beginLogin = { accountID, forcePaste, _ in
+            script.beginCalls.append((accountID, forcePaste, nil))
+            guard !forcePaste else {
+                let pending = PendingLogin(
+                    accountID: accountID, mode: .paste, pkce: pkce,
+                    redirectURI: OAuthEndpoints.pasteRedirect, startedAt: Date(timeIntervalSince1970: 0))
+                return (pending, url, nil, nil)
+            }
+            let pending = PendingLogin(
+                accountID: accountID, mode: .loopback(port: port), pkce: pkce,
+                redirectURI: "http://127.0.0.1:\(port)/callback", startedAt: Date(timeIntervalSince1970: 0))
+            let callback = Task<String?, Never> {
+                await server.waitForCallback(expectedState: pkce.state, timeout: 600)
+            }
+            return (pending, url, server, callback)
+        }
+
+        let account = Account(label: "Work", accountUUID: "acct-A")
+        let defaults = ephemeralDefaults()
+        let accountsStore = AccountsStore(defaults: defaults)
+        accountsStore.save([account])
+        let vm = AccountsViewModel(
+            accountsStore: accountsStore, credentialStore: InMemoryAccountCredentialStore(),
+            defaults: defaults, startTimer: false, deps: deps)
+
+        let login = Task { await vm.beginLogin(account.id) }
+        while vm.pendingLogin == nil { await Task.yield() }
+        #expect(vm.loginAffordance(for: account.id) == .waitingForBrowser)
+
+        await vm.switchToPaste()
+        await login.value
+
+        #expect(script.beginCalls.count == 2)
+        #expect(script.beginCalls.last?.forcePaste == true)
+        #expect(vm.pendingLogin?.mode == .paste)
+        #expect(vm.loginState[account.id] == .awaitingPaste)
+        // The abandoned listener is really gone: a stopped server refuses to start again.
+        await #expect(throws: LoopbackServer.StartError.self) { try await server.start() }
+    }
+
     // MARK: - Exchange taxonomy
 
     @Test("A rejected exchange says the code is spent — not that the account is wrong")
@@ -560,7 +650,11 @@ struct AccountsViewModelBrowserLoginTests {
         #expect(message.contains("Work"))
         #expect(try store.loadAll()[account.id]?.accessToken == "old-token")   // grant dropped
         #expect(vm.pendingLogin == nil)
-        #expect(script.notifications.isEmpty)
+        // The popover is shut while the browser has focus, so the rejection is only visible
+        // as a notification — and it must not be mistaken for a success.
+        #expect(script.notifications.count == 1)
+        #expect(script.notifications.first?.content.body.contains("b@example.com") == true)
+        #expect(script.notifications.first?.content.title.contains("didn't finish") == true)
     }
 
     @Test("A credential save failure is a distinct terminal state, not a silent success")
@@ -581,11 +675,52 @@ struct AccountsViewModelBrowserLoginTests {
 
         let message = failureMessage(vm.loginState[account.id], "credential save failure")
         #expect(message.contains("keychain"))
+        // The same error covers a failed write, so it must not diagnose the item as unreadable.
+        #expect(message.hasPrefix("Couldn't store the login"))
+        #expect(!message.contains("unreadable"))
         #expect(!message.contains("signed into"))
         #expect(vm.needsReAuth[account.id] == true)   // nothing landed, so nothing is fixed
         #expect(store.saveWasCalled == false)
-        #expect(script.notifications.isEmpty)
+        // Reported as a failure, never as the success it isn't.
+        #expect(script.notifications.count == 1)
+        #expect(script.notifications.first?.content.title.contains("didn't finish") == true)
         #expect(vm.pendingLogin == nil)
+    }
+
+    @Test("An identity failure notifies too: it parks the login where nothing else can be started")
+    func identityFailureNotifies() async {
+        let script = Script()
+        script.callbackCode = "auth-code"
+        script.exchangeResults = [.success(Self.freshCredentials)]
+        script.identityResults = [.failure(URLError(.timedOut))]
+
+        let account = Account(label: "Work", accountUUID: "acct-A")
+        let vm = makeVM(script, accounts: [account], store: InMemoryAccountCredentialStore())
+
+        await vm.beginLogin(account.id)
+
+        #expect(script.notifications.count == 1)
+        #expect(script.notifications.first?.content.body.contains("couldn't verify") == true)
+        // And the UI has both ways out of it, rather than a pill that refuses every click.
+        #expect(vm.canRetryIdentity(for: account.id))
+        #expect(vm.loginAffordance(for: account.id).actions == [.retryIdentity, .cancel])
+    }
+
+    @Test("A login that fails to start is reported, and only a real failure is")
+    func startFailureNotifiesButCancellationDoesNot() async {
+        let script = Script()
+        script.beginError = OAuthLoginError.transient
+
+        let account = Account(label: "Work", accountUUID: "acct-A")
+        let vm = makeVM(script, accounts: [account], store: InMemoryAccountCredentialStore())
+
+        await vm.beginLogin(account.id)
+        #expect(script.notifications.count == 1)
+
+        script.beginError = CancellationError()
+        await vm.beginLogin(account.id)
+        #expect(vm.loginState[account.id] == .idle)
+        #expect(script.notifications.count == 1)   // cancelling is the user's own doing
     }
 
     // MARK: - Add account
@@ -705,11 +840,59 @@ struct AccountsViewModelBrowserLoginTests {
         #expect(message.contains("doesn't match"))
         #expect(script.exchangeCount == 0)   // a foreign code is never exchanged
         #expect(vm.pendingLogin != nil)      // the login survives, so a correct paste still works
+        // …so the field stays on screen with the rejection, rather than the state reading as a
+        // terminal failure whose "try again" the pending login would silently refuse.
+        #expect(vm.loginAffordance(for: account.id) == .awaitingPaste(message: message))
+        // And that message can't be dismissed out from under a login that is still live.
+        vm.dismissLoginMessage(for: account.id)
+        #expect(vm.loginAffordance(for: account.id) == .awaitingPaste(message: message))
 
         await vm.submitPaste("auth-code#\(script.pkce.state)")
 
         #expect(script.exchangeCount == 1)
         #expect(vm.loginState[account.id] == .idle)
         #expect(try store.loadAll()[account.id]?.accessToken == "fresh-token")
+    }
+
+    @Test("A finished login's message can be dismissed, so it doesn't sit in the popover forever")
+    func terminalMessageIsDismissible() async {
+        let script = Script()
+        script.callbackCode = "auth-code"
+        script.exchangeResults = [.failure(OAuthLoginError.exchangeRejected)]
+
+        let account = Account(label: "Work", accountUUID: "acct-A")
+        let vm = makeVM(script, accounts: [account], store: InMemoryAccountCredentialStore())
+
+        await vm.beginLogin(account.id)
+        #expect(vm.loginAffordance(for: account.id).actions == [.tryAgain, .dismiss])
+
+        vm.dismissLoginMessage(for: account.id)
+
+        // Nothing else clears the message: this flow's state isn't written again until it
+        // logs in. Dismissing drops back to the plain offer of a login — the account's token
+        // is still dead, so the way back in has to stay on screen.
+        #expect(vm.loginState[account.id] == .idle)
+        #expect(vm.needsReAuth[account.id] == true)
+        #expect(vm.loginAffordance(for: account.id) == .start)
+    }
+
+    @Test("The add flow's notice is dismissible, so it can't squat where the Add button goes")
+    func addFlowNoticeIsDismissible() async {
+        let script = Script()
+        script.callbackCode = "auth-code"
+        script.exchangeResults = [.success(Self.freshCredentials)]
+        script.identityResults = [.success(identity("acct-A", email: "a@example.com"))]
+
+        let account = Account(label: "Work", accountUUID: "acct-A", email: "a@example.com")
+        let vm = makeVM(script, accounts: [account], store: InMemoryAccountCredentialStore())
+
+        await vm.beginLogin(nil)   // an already-tracked identity: the notice rides on `.failed`
+
+        #expect(vm.loginAffordance(for: nil).message?.contains("already tracked") == true)
+
+        vm.dismissLoginMessage(for: nil)
+
+        #expect(vm.addLoginState == .idle)
+        #expect(vm.loginAffordance(for: nil) == LoginAffordance.none)
     }
 }

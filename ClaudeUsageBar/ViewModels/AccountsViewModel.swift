@@ -37,6 +37,10 @@ final class AccountsViewModel: ObservableObject {
     /// time, whether it's re-auth for an existing account or the accountID==nil
     /// add-account path.
     @Published private(set) var pendingLogin: PendingLogin?
+    /// The URL handed to the browser for `pendingLogin`, kept so the popover can offer it as
+    /// "Copy link" — the recovery when the browser that opened is signed into the wrong
+    /// profile. Never log it: it carries the PKCE challenge and, on re-auth, a real email.
+    @Published private(set) var pendingAuthorizeURL: URL?
     /// Login state for the accountID==nil "add account" flow, mirroring `loginState`'s
     /// per-account entries.
     @Published var addLoginState: LoginState = .idle
@@ -307,11 +311,22 @@ final class AccountsViewModel: ObservableObject {
             // (waiting, or awaiting a paste) already says what is happening, and replacing
             // that with a failure would strand a login that is still live.
             if pendingLogin?.accountID != accountID {
-                setLoginState(.failed("Finish the login in progress first."), for: accountID)
+                setLoginState(.failed(Self.busyMessage), for: accountID)
             }
             return
         }
         await runLogin(accountID, forcePaste: forcePaste)
+    }
+
+    /// Abandons the browser wait and restarts the same login in paste mode — the "use a code
+    /// instead" recovery for a redirect that never comes back (a browser that blocks loopback
+    /// requests, or a tab the user closed). The redirect URI is fixed for the life of a login,
+    /// so switching modes has to be a brand-new login, not a change to this one.
+    func switchToPaste() async {
+        guard let pending = pendingLogin, pending.mode != .paste else { return }
+        let owner = pending.accountID
+        await cancelLogin()
+        await beginLogin(owner, forcePaste: true)
     }
 
     /// Finishes a paste-mode login from the `code#state` string Anthropic's callback page
@@ -347,6 +362,39 @@ final class AccountsViewModel: ObservableObject {
         await verifyAndStore(grant, pending: pending)
     }
 
+    /// Whether `retryIdentity()` would do anything for this flow: its identity step failed
+    /// with the grant still in hand. The popover needs this to tell that state apart from a
+    /// terminal failure — they share the `.failed` case but not their way out.
+    func canRetryIdentity(for accountID: UUID?) -> Bool {
+        guard let pending = pendingLogin, unverifiedGrant != nil else { return false }
+        return pending.accountID == accountID
+    }
+
+    /// What the login control should offer for one flow (`nil` = the add-account flow).
+    func loginAffordance(for accountID: UUID?) -> LoginAffordance {
+        LoginAffordance.resolve(
+            state: currentLoginState(for: accountID),
+            needsReAuth: accountID.map { needsReAuth[$0] == true } ?? false,
+            canRetryIdentity: canRetryIdentity(for: accountID),
+            hasLivePasteLogin: pendingLogin.map { $0.accountID == accountID && $0.mode == .paste } ?? false)
+    }
+
+    /// Clears a finished login's message once it has been read. Nothing else does: a flow's
+    /// state isn't touched again until it starts another login, so a terminal failure would
+    /// otherwise sit in the popover for the life of the app — and for the add-account flow it
+    /// sits where the "Add account…" button belongs.
+    func dismissLoginMessage(for accountID: UUID?) {
+        // A live login owns its flow's state, including a message about a paste it is still
+        // willing to accept.
+        if let pending = pendingLogin, pending.accountID == accountID { return }
+        guard case .failed = currentLoginState(for: accountID) else { return }
+        setLoginState(.idle, for: accountID)
+    }
+
+    private func currentLoginState(for accountID: UUID?) -> LoginState {
+        accountID.map { loginState[$0] ?? .idle } ?? addLoginState
+    }
+
     private func runLogin(_ accountID: UUID?, forcePaste: Bool) async {
         isStartingLogin = true
         let started: (pending: PendingLogin, authorizeURL: URL,
@@ -356,14 +404,22 @@ final class AccountsViewModel: ObservableObject {
             isStartingLogin = false
         } catch {
             isStartingLogin = false
-            setLoginState(isCancellation(error) ? .idle : .failed("Couldn't start the login — try again."),
-                          for: accountID)
+            if isCancellation(error) {
+                setLoginState(.idle, for: accountID)
+            } else {
+                let message = "Couldn't start the login — try again."
+                setLoginState(.failed(message), for: accountID)
+                notifyLoginProblem(accountID: accountID, message: message)
+            }
+            // No login started, so nothing holds the pending slot any more.
+            clearBusyNotices(except: accountID)
             return
         }
 
         loginEpoch += 1
         let epoch = loginEpoch
         pendingLogin = started.pending
+        pendingAuthorizeURL = started.authorizeURL
         loginServer = started.server
         setLoginState(started.pending.mode == .paste ? .awaitingPaste : .waitingForBrowser(since: deps.now()),
                       for: accountID)
@@ -468,8 +524,12 @@ final class AccountsViewModel: ObservableObject {
             }
             // The grant and the pending login stay in memory so `retryIdentity()` can re-run
             // only this step.
-            setLoginState(.failed("Logged in, but couldn't verify the account — Retry."),
-                          for: pending.accountID)
+            let message = "Logged in, but couldn't verify the account — Retry."
+            setLoginState(.failed(message), for: pending.accountID)
+            // Not terminal, but it is where the login stops without the user being told: this
+            // state holds the pending login, so every later click is refused until they come
+            // back and press Retry or Cancel.
+            notifyLoginProblem(accountID: pending.accountID, message: message)
             return
         }
         guard epoch == loginEpoch else { return }
@@ -547,7 +607,9 @@ final class AccountsViewModel: ObservableObject {
                                 owner: UUID?, notice: String?) async {
         guard await storeGrant(grant, for: accountID, owner: owner) else { return }
         needsReAuth[accountID] = false
-        await endLogin(notice.map(LoginState.failed) ?? .idle, for: owner)
+        // `notifyFailure: false`: a notice rides on `.failed` but the login itself succeeded,
+        // and `notifyLoginSucceeded` below already reports it.
+        await endLogin(notice.map(LoginState.failed) ?? .idle, for: owner, notifyFailure: false)
         notifyLoginSucceeded(accountID: accountID)
         await runtimes[accountID]?.credentialsReplaced()
     }
@@ -561,7 +623,9 @@ final class AccountsViewModel: ObservableObject {
             try credentials.update(id: accountID, credentials: grant)
             return true
         } catch {
-            await endLogin(.failed("Logged in, but couldn't store it — keychain unreadable."), for: owner)
+            // "Couldn't store" first: this fires for a failed *write* as well as an unreadable
+            // item, so leading with the read diagnosis names the wrong problem.
+            await endLogin(.failed("Couldn't store the login — the keychain refused it."), for: owner)
             return false
         }
     }
@@ -570,12 +634,34 @@ final class AccountsViewModel: ObservableObject {
     /// turns a step of the finished login that is still awaiting into a no-op, so it happens
     /// before the listener is stopped — `stop()` resumes a waiting callback with `nil`, and
     /// that resumption must not be read as a timeout.
-    private func endLogin(_ state: LoginState, for owner: UUID?) async {
+    ///
+    /// `notifyFailure` is false only where a `.failed` state carries a notice about a login
+    /// that actually landed.
+    private func endLogin(_ state: LoginState, for owner: UUID?, notifyFailure: Bool = true) async {
         pendingLogin = nil
+        pendingAuthorizeURL = nil
         unverifiedGrant = nil
         loginEpoch += 1
         setLoginState(state, for: owner)
+        clearBusyNotices(except: owner)
+        if notifyFailure, case .failed(let message) = state {
+            notifyLoginProblem(accountID: owner, message: message)
+        }
         await releaseLoginServer()
+    }
+
+    /// What a login request is told when another login already owns the one pending slot.
+    private static let busyMessage = "Finish the login in progress first."
+
+    /// Clears that refusal from every flow except `owner`, whose state the caller has just
+    /// set. The message is written onto whichever account was clicked *second*, so nothing
+    /// that flow does clears it — without this sweep it sits there looking like that
+    /// account's own failure until it starts a login of its own.
+    private func clearBusyNotices(except owner: UUID?) {
+        for (id, state) in loginState where id != owner && state == .failed(Self.busyMessage) {
+            loginState[id] = .idle
+        }
+        if owner != nil, addLoginState == .failed(Self.busyMessage) { addLoginState = .idle }
     }
 
     /// Stops this login's loopback listener, if it had one. `begin`'s callback task stops the
@@ -626,6 +712,19 @@ final class AccountsViewModel: ObservableObject {
         content.body = "Usage tracking is active for this account."
         deps.addNotification(UNNotificationRequest(
             identifier: "login-\(accountID.uuidString)", content: content, trigger: nil))
+    }
+
+    /// The same reason for a login that didn't land. Without this the user is left staring at
+    /// a browser tab that looks finished, with the app's rejection visible only if they happen
+    /// to reopen the popover. Deliberately silent on cancellation: they stopped it themselves.
+    private func notifyLoginProblem(accountID: UUID?, message: String) {
+        let label = accountID.flatMap { id in accounts.first(where: { $0.id == id })?.label }
+            ?? "Claude Usage"
+        let content = UNMutableNotificationContent()
+        content.title = "\(label): login didn't finish"
+        content.body = message
+        deps.addNotification(UNNotificationRequest(
+            identifier: "login-failed-\(accountID?.uuidString ?? "add")", content: content, trigger: nil))
     }
 
     // MARK: - Account operations
