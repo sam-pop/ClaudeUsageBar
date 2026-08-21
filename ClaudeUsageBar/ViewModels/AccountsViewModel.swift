@@ -22,12 +22,97 @@ final class AccountsViewModel: ObservableObject {
         didSet { UserDefaults.standard.set(menuBarDisplayMode.rawValue, forKey: "menuBarDisplayMode") }
     }
 
+    /// Where a browser login currently stands for one account. Keyed by account id for a
+    /// re-auth login; the accountID==nil "add account" flow instead uses `addLoginState`.
+    enum LoginState: Equatable {
+        case idle
+        case waitingForBrowser(since: Date)
+        case awaitingPaste
+        case failed(String)
+    }
+
+    @Published private(set) var loginState: [UUID: LoginState] = [:]
+    /// The login this view model is currently driving, if any — exactly one at a time
+    /// across both the re-auth and add-account flows.
+    @Published private(set) var pendingLogin: PendingLogin?
+    /// Login state for the accountID==nil "add account" flow, mirroring `loginState`'s
+    /// per-account entries.
+    @Published var addLoginState: LoginState = .idle
+
+    /// Injected login/exchange/identity/clock seam for the browser OAuth flow, mirroring
+    /// `AccountRuntime.Dependencies`. Kept separate from `AccountRuntime.Dependencies`
+    /// because this coordinator's login flow needs `openURL` and no other runtime does.
+    struct Dependencies {
+        var beginLogin: (_ accountID: UUID?, _ forcePaste: Bool, _ loginHintEmail: String?) async throws
+            -> (pending: PendingLogin, authorizeURL: URL, server: LoopbackServer?, callback: Task<String?, Never>?)
+        var exchange: (_ code: String, _ pending: PendingLogin) async throws -> CachedCredentials
+        var fetchIdentity: (_ token: String) async throws -> AccountIdentity
+        var openURL: (URL) -> Void
+        var now: () -> Date
+        /// Reads the legacy single-account credentials for the one-time `AccountMigration`
+        /// run at init. A test double must return `nil` here — the real implementation
+        /// falls through to Claude Code's keychain item, which can show a system prompt.
+        var resolveLegacyCredentials: () -> CachedCredentials?
+        /// Deletes the legacy plaintext cache file and the legacy single-account keychain
+        /// item, once migration has verified the new copy landed. A test double must be a
+        /// no-op — the real implementation touches the keychain and the filesystem.
+        var deleteLegacyArtifacts: () -> Void
+
+        init(
+            beginLogin: @escaping (_ accountID: UUID?, _ forcePaste: Bool, _ loginHintEmail: String?) async throws
+                -> (pending: PendingLogin, authorizeURL: URL, server: LoopbackServer?, callback: Task<String?, Never>?),
+            exchange: @escaping (_ code: String, _ pending: PendingLogin) async throws -> CachedCredentials,
+            fetchIdentity: @escaping (_ token: String) async throws -> AccountIdentity,
+            openURL: @escaping (URL) -> Void,
+            now: @escaping () -> Date,
+            resolveLegacyCredentials: @escaping () -> CachedCredentials?,
+            deleteLegacyArtifacts: @escaping () -> Void
+        ) {
+            self.beginLogin = beginLogin
+            self.exchange = exchange
+            self.fetchIdentity = fetchIdentity
+            self.openURL = openURL
+            self.now = now
+            self.resolveLegacyCredentials = resolveLegacyCredentials
+            self.deleteLegacyArtifacts = deleteLegacyArtifacts
+        }
+
+        /// Wires the real `OAuthLoginService`, `ProfileService`, system browser opener, and
+        /// the legacy-migration keychain/filesystem calls `AccountsViewModel.init` used to
+        /// hardcode. Builds closures only — none of them run until the view model calls
+        /// one, so constructing `.live` performs no I/O.
+        static var live: Dependencies {
+            Dependencies(
+                beginLogin: { accountID, forcePaste, loginHintEmail in
+                    try await OAuthLoginService().begin(
+                        accountID: accountID, forcePaste: forcePaste, loginHintEmail: loginHintEmail)
+                },
+                exchange: { code, pending in
+                    try await OAuthLoginService().exchange(code: code, pending: pending)
+                },
+                fetchIdentity: { token in
+                    try await ProfileService.fetchIdentity(token: token)
+                },
+                openURL: { url in
+                    NSWorkspace.shared.open(url)
+                },
+                now: Date.init,
+                resolveLegacyCredentials: { KeychainService.getCredentials() },
+                deleteLegacyArtifacts: {
+                    KeychainCredentialStore().delete()
+                    try? FileManager.default.removeItem(at: KeychainService.defaultLegacyCacheURL)
+                }
+            )
+        }
+    }
+
     private var runtimes: [UUID: AccountRuntime] = [:]
     private var identityBackfillInFlight: Set<UUID> = []
     private let accountsStore: AccountsStore
     private let credentialStore: AccountCredentialStoring
     private let credentials: AccountCredentialManager
     private let defaults: UserDefaults
+    private let deps: Dependencies
     private var timer: Timer?
 
     // MARK: - Init
@@ -36,12 +121,14 @@ final class AccountsViewModel: ObservableObject {
         accountsStore: AccountsStore = AccountsStore(),
         credentialStore: AccountCredentialStoring = KeychainAccountCredentialStore(),
         defaults: UserDefaults = .standard,
-        startTimer: Bool = true
+        startTimer: Bool = true,
+        deps: Dependencies = .live
     ) {
         self.accountsStore = accountsStore
         self.credentialStore = credentialStore
         self.credentials = AccountCredentialManager(store: credentialStore)
         self.defaults = defaults
+        self.deps = deps
 
         let raw = defaults.string(forKey: "menuBarDisplayMode") ?? "auto"
         self.menuBarDisplayMode = MenuBarDisplayMode(rawValue: raw) ?? .auto
@@ -51,11 +138,8 @@ final class AccountsViewModel: ObservableObject {
             accountsStore: accountsStore,
             credentialStore: credentialStore,
             defaults: defaults,
-            resolveLegacyCredentials: { KeychainService.getCredentials() },
-            deleteLegacyArtifacts: {
-                KeychainCredentialStore().delete()
-                try? FileManager.default.removeItem(at: KeychainService.defaultLegacyCacheURL)
-            }
+            resolveLegacyCredentials: deps.resolveLegacyCredentials,
+            deleteLegacyArtifacts: deps.deleteLegacyArtifacts
         )
         self.accounts = migration.run()
 
