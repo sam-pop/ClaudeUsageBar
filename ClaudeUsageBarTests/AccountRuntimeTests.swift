@@ -1,6 +1,42 @@
 import Testing
 import Foundation
 
+/// Test-only rendezvous: lets a concurrently-running call (e.g. a stale `refresh()`) signal
+/// that it has reached a specific suspension point, and lets the test block until that
+/// signal arrives before proceeding — then release it deterministically later. Avoids
+/// relying on `Task.yield()` timing assumptions to force a specific interleaving.
+private actor AsyncGate {
+    private var arrived = false
+    private var released = false
+    private var arrivalWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    /// Called by the code under test: signals arrival, then suspends until `release()`.
+    func arriveAndWait() async {
+        arrived = true
+        let pending = arrivalWaiters
+        arrivalWaiters.removeAll()
+        pending.forEach { $0.resume() }
+
+        if released { return }
+        await withCheckedContinuation { releaseWaiters.append($0) }
+    }
+
+    /// Called by the test: blocks until `arriveAndWait()` has been called at least once.
+    func waitUntilArrived() async {
+        if arrived { return }
+        await withCheckedContinuation { arrivalWaiters.append($0) }
+    }
+
+    /// Called by the test: lets a suspended `arriveAndWait()` call resume.
+    func release() {
+        released = true
+        let pending = releaseWaiters
+        releaseWaiters.removeAll()
+        pending.forEach { $0.resume() }
+    }
+}
+
 @Suite("AccountRuntime")
 @MainActor
 struct AccountRuntimeTests {
@@ -190,5 +226,90 @@ struct AccountRuntimeTests {
         let saved = try manager.credentials(for: id)
         #expect(saved?.accessToken == "sk-ant-oat01-new")
         #expect(saved?.refreshTokenExpiresAt == oldExpiry)
+    }
+
+    @Test("tryTokenRefresh uses the new refreshTokenExpiresAt when the response provides one")
+    func carryForwardDoesNotOverwriteAFresherExpiry() async throws {
+        let defaults = ephemeralDefaults()
+        let id = UUID()
+        let oldExpiry = Date(timeIntervalSince1970: 2_000_000)
+        let newExpiry = Date(timeIntervalSince1970: 3_000_000)
+        let store = InMemoryAccountCredentialStore([
+            id: CachedCredentials(accessToken: "sk-ant-oat01-old", refreshToken: "r",
+                                  expiresAt: nil, refreshTokenExpiresAt: oldExpiry)
+        ])
+        let manager = AccountCredentialManager(store: store)
+
+        let deps = AccountRuntime.Dependencies(
+            fetchUsage: { token in
+                if token == "sk-ant-oat01-old" { throw UsageAPIError.invalidResponse(401) }
+                return self.response(five: 5, seven: 5)
+            },
+            refreshToken: { old in
+                // A response that DOES rotate the refresh-token expiry must win over the
+                // stale value — the carry-forward guard exists only for the omitted case.
+                CachedCredentials(accessToken: "sk-ant-oat01-new", refreshToken: old.refreshToken,
+                                  expiresAt: nil, refreshTokenExpiresAt: newExpiry)
+            },
+            now: { self.t0 }
+        )
+        let runtime = AccountRuntime(id: id, credentials: manager,
+                                     persistence: AccountPersistence(defaults: defaults, accountID: id),
+                                     deps: deps)
+
+        await runtime.refresh()
+
+        let saved = try manager.credentials(for: id)
+        #expect(saved?.refreshTokenExpiresAt == newExpiry)
+    }
+
+    @Test("A stale refresh in flight when credentialsReplaced runs does not clobber the fresh state")
+    func staleRefreshDoesNotClobberFreshState() async throws {
+        let defaults = ephemeralDefaults()
+        let id = UUID()
+        let store = InMemoryAccountCredentialStore([
+            id: CachedCredentials(accessToken: "sk-ant-oat01-old", refreshToken: "r-old", expiresAt: nil)
+        ])
+        let manager = AccountCredentialManager(store: store)
+
+        // Blocks the "stale tick"'s fetchUsage call on the dead token until the test
+        // explicitly releases it — well after credentialsReplaced() has already completed.
+        let gate = AsyncGate()
+
+        let deps = AccountRuntime.Dependencies(
+            fetchUsage: { token in
+                if token == "sk-ant-oat01-old" {
+                    await gate.arriveAndWait()
+                    throw UsageAPIError.invalidResponse(401)   // resumes late, now irrelevant
+                }
+                return self.response(five: 42, seven: 42)
+            },
+            refreshToken: { _ in throw KeychainServiceError.noRefreshToken },   // the stale refresh token is dead too
+            now: { self.t0 }
+        )
+        let runtime = AccountRuntime(id: id, credentials: manager,
+                                     persistence: AccountPersistence(defaults: defaults, accountID: id),
+                                     deps: deps)
+
+        // Simulates a 60s-timer tick already in flight when a browser login lands.
+        let staleTick = Task { await runtime.refresh() }
+        await gate.waitUntilArrived()
+
+        // Simulates the credential-store write a fresh browser login performs before
+        // calling credentialsReplaced() (owned by the login flow, not this runtime).
+        try manager.update(id: id, credentials: CachedCredentials(
+            accessToken: "sk-ant-oat01-new", refreshToken: "r-new", expiresAt: nil))
+        await runtime.credentialsReplaced()
+
+        #expect(runtime.needsReAuth == false)
+        #expect(runtime.snapshot?.fiveHourPercent == 42)
+
+        // Let the stale tick's fetchUsage finally return its now-irrelevant 401.
+        await gate.release()
+        await staleTick.value
+
+        // The stale completion must not have clobbered the fresh state set above.
+        #expect(runtime.needsReAuth == false)
+        #expect(runtime.snapshot?.fiveHourPercent == 42)
     }
 }

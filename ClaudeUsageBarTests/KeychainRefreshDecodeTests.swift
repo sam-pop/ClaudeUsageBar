@@ -14,8 +14,10 @@ struct KeychainRefreshDecodeTests {
         // Pinned to the exact seconds, not just "some future date" — expires_in and
         // refresh_token_expires_in differ by ~83x, so a field swap in the decoder would
         // fail these but pass a bare `!= nil` check.
-        #expect(abs(creds.expiresAt!.timeIntervalSince(fixedNow) - 28800) < 1)
-        #expect(abs(creds.refreshTokenExpiresAt!.timeIntervalSince(fixedNow) - 2_383_011) < 1)
+        let expiresAt = try #require(creds.expiresAt)
+        let refreshTokenExpiresAt = try #require(creds.refreshTokenExpiresAt)
+        #expect(abs(expiresAt.timeIntervalSince(fixedNow) - 28800) < 1)
+        #expect(abs(refreshTokenExpiresAt.timeIntervalSince(fixedNow) - 2_383_011) < 1)
     }
 
     @Test("A response omitting refresh_token falls back to the token that was sent")

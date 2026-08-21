@@ -62,6 +62,11 @@ final class AccountRuntime {
     private var breaker: RefreshCircuitBreaker
     private var thresholdTracker: ThresholdTracker
     private var refreshTask: Task<Void, Never>?
+    /// Bumped by `credentialsReplaced()`. A `refresh()` call captures this at entry and
+    /// checks it again after its awaited fetch returns; if it no longer matches, a newer
+    /// `refresh()` (from `credentialsReplaced()`) has already run to completion, so this
+    /// call's result is stale and must not overwrite `state`/`needsReAuth`/`snapshot`.
+    private var epoch = 0
 
     private static let maxHistoryPoints = 288      // 24 hours at 5-min sampling
     private static let historySampleInterval: TimeInterval = 300
@@ -88,9 +93,11 @@ final class AccountRuntime {
     }
 
     func refresh() async {
+        let startEpoch = epoch
         if snapshot == nil { state = .loading }
         do {
             let snap = try await fetchWithRetry()
+            guard startEpoch == epoch else { return }
             snapshot = snap
             state = .loaded(snap)
             needsReAuth = false
@@ -98,9 +105,11 @@ final class AccountRuntime {
             recordHistory(snap)
             checkThresholds(snap)
         } catch let error as UsageAPIError {
+            guard startEpoch == epoch else { return }
             state = .error(error.localizedDescription)
             needsReAuth = error.needsKeychainRefresh
         } catch {
+            guard startEpoch == epoch else { return }
             state = .error(error.localizedDescription)
         }
         onChange()
@@ -115,9 +124,12 @@ final class AccountRuntime {
     /// browser login). Resets the circuit breaker to a fresh un-tripped state — the prior
     /// breaker may still be tripped from the dead-token era and would otherwise keep
     /// blocking refresh attempts for up to its re-arm window even though the new
-    /// credentials are known-good — clears `needsReAuth`, and re-fetches.
+    /// credentials are known-good — clears `needsReAuth`, bumps `epoch` so a `refresh()`
+    /// already in flight (e.g. a timer tick that started against the old credentials)
+    /// cannot clobber this call's result when it later resumes, and re-fetches.
     func credentialsReplaced() async {
-        breaker = RefreshCircuitBreaker()
+        epoch += 1
+        breaker.reset()
         needsReAuth = false
         await refresh()
     }
@@ -164,9 +176,9 @@ final class AccountRuntime {
         do {
             var refreshed = try await deps.refreshToken(creds)
             // A refresh response that omits refresh_token_expires_in must not be read as
-            // "expiry unknown" — carry forward the prior value so the rolling ~28-day
-            // refresh-token expiry (and its pre-expiry warning) survive a response that
-            // simply didn't repeat the field.
+            // "expiry unknown" — carry forward the prior value as a conservative floor:
+            // under token rotation the true expiry can only be later, and nil would
+            // silently disable the expiry warning entirely.
             if refreshed.refreshTokenExpiresAt == nil {
                 refreshed.refreshTokenExpiresAt = creds.refreshTokenExpiresAt
             }
