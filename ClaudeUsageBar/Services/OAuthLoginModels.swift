@@ -1,0 +1,62 @@
+import Foundation
+
+/// How the browser OAuth login receives its authorization code back from Anthropic.
+/// `loopback` runs a local HTTP server on an ephemeral port and captures the redirect
+/// directly; `paste` sends the browser to Anthropic's own callback page, which renders
+/// a `code#state` string for the user to copy back into the app.
+enum OAuthLoginMode: Equatable {
+    case loopback(port: UInt16)
+    case paste
+}
+
+/// A browser OAuth login that has been started but not yet completed. `pkce` is the
+/// verifier/challenge/state generated for this attempt; `redirectURI` is whichever
+/// URI was registered with the authorize request for the chosen `mode` (loopback or
+/// the console's paste-mode callback). `accountID` is set when this login is
+/// re-authenticating an existing account, so its identity can be checked against the
+/// account returned by the token exchange.
+struct PendingLogin: Equatable {
+    let accountID: UUID?
+    let mode: OAuthLoginMode
+    let pkce: OAuthPKCE
+    let redirectURI: String
+    let startedAt: Date
+}
+
+/// Anthropic's OAuth endpoints and client parameters for the browser login flow,
+/// confirmed live against the real servers during the design spike for this feature.
+enum OAuthEndpoints {
+    static let authorize = "https://claude.ai/oauth/authorize"
+    static let token = "https://console.anthropic.com/v1/oauth/token"
+    /// Anthropic's own callback page for paste mode: it renders a `code#state` string
+    /// for the user to copy back into the app, instead of redirecting to a local port.
+    static let pasteRedirect = "https://console.anthropic.com/oauth/code/callback"
+    static let clientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+    /// Deliberately excludes `org:create_api_key`: the server drops it if requested,
+    /// and omitting it keeps api-key-minting privilege off every stored token.
+    static let scope = "user:profile user:inference"
+}
+
+extension PendingLogin {
+    /// Builds the authorize URL for this login attempt. `loginHintEmail` should be
+    /// supplied only when re-authing a known account, to preselect it; otherwise omit
+    /// it so the user picks an account themselves.
+    func authorizeURL(loginHintEmail: String?) -> URL {
+        var comps = URLComponents(string: OAuthEndpoints.authorize)!
+        var items = [
+            URLQueryItem(name: "code", value: "true"),
+            URLQueryItem(name: "client_id", value: OAuthEndpoints.clientID),
+            URLQueryItem(name: "response_type", value: "code"),
+            URLQueryItem(name: "redirect_uri", value: redirectURI),
+            URLQueryItem(name: "scope", value: OAuthEndpoints.scope),
+            URLQueryItem(name: "code_challenge", value: pkce.challenge),
+            URLQueryItem(name: "code_challenge_method", value: "S256"),
+            URLQueryItem(name: "state", value: pkce.state),
+        ]
+        if let loginHintEmail {
+            items.append(URLQueryItem(name: "login_hint", value: loginHintEmail))
+        }
+        comps.queryItems = items
+        return comps.url!
+    }
+}
