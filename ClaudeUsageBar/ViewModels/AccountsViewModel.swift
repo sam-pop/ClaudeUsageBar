@@ -384,8 +384,13 @@ final class AccountsViewModel: ObservableObject {
             await endLogin(.idle, for: accountID)
             // At most one restart: paste mode has no listener, so it cannot time out in turn.
             // Guarding on the flag rather than on `begin` returning no callback keeps that
-            // true even if the seam ever hands a forced-paste login a listener anyway.
-            if !forcePaste { await runLogin(accountID, forcePaste: true) }
+            // true even if the seam ever hands a forced-paste login a listener anyway. The
+            // pending-login checks are re-run because `endLogin` above suspends, and a login
+            // started in that window has already claimed the one pending slot — restarting on
+            // top of it would strand its listener.
+            if !forcePaste, pendingLogin == nil, !isStartingLogin {
+                await runLogin(accountID, forcePaste: true)
+            }
             return
         }
         await finishLogin(code: code)
@@ -396,10 +401,14 @@ final class AccountsViewModel: ObservableObject {
     /// network blip tell the user to go switch accounts.
     private func finishLogin(code: String) async {
         guard let pending = pendingLogin else { return }
+        // Captured before the release below, which suspends: a `cancelLogin()` landing in
+        // that window bumps the epoch, and reading it afterwards would capture the
+        // post-cancel value and let every later guard pass.
+        let epoch = loginEpoch
         // The code is in hand, so the listener has no further role: on the loopback path
         // `begin`'s callback task has already stopped it, and this drops the reference.
         await releaseLoginServer()
-        let epoch = loginEpoch
+        guard epoch == loginEpoch else { return }
 
         let grant: CachedCredentials
         do {
@@ -600,6 +609,11 @@ final class AccountsViewModel: ObservableObject {
     /// rather than as one of `OAuthLoginError`'s cases.
     private func isCancellation(_ error: Error) -> Bool {
         if Task.isCancelled || error is CancellationError { return true }
+        // `ProfileService` wraps every transport error, cancellation included, so the
+        // `URLError` has to be unwrapped for the identity step to reach this branch at all.
+        if case .requestFailed(let underlying) = error as? UsageAPIError {
+            return (underlying as? URLError)?.code == .cancelled
+        }
         return (error as? URLError)?.code == .cancelled
     }
 

@@ -147,6 +147,9 @@ struct AccountsViewModelBrowserLoginTests {
         /// What the loopback callback task yields: a code, or `nil` for a timeout.
         var callbackCode: String?
         var callbackDelay: Duration = .zero
+        /// Hand a callback back for paste mode too — which the real `begin` never does. Only
+        /// for proving the restart is bounded by the caller rather than by that contract.
+        var pasteYieldsCallback = false
         /// Scripted results, consumed front to back; the last entry repeats.
         var exchangeResults: [Result<CachedCredentials, Error>] = []
         var identityResults: [Result<AccountIdentity, Error>] = []
@@ -197,7 +200,7 @@ struct AccountsViewModelBrowserLoginTests {
                     startedAt: Date(timeIntervalSince1970: 0))
                 // Stand-in for the authorize URL; the real one is built by `OAuthLoginService`.
                 let url = URL(string: "https://claude.ai/oauth/authorize")!
-                guard !paste else { return (pending, url, nil, nil) }
+                guard !paste || script.pasteYieldsCallback else { return (pending, url, nil, nil) }
                 let code = script.callbackCode
                 let delay = script.callbackDelay
                 let callback = Task<String?, Never> {
@@ -340,6 +343,25 @@ struct AccountsViewModelBrowserLoginTests {
         #expect(vm.loginState[account.id] == .awaitingPaste)
         #expect(vm.pendingLogin?.mode == .paste)
         #expect(script.exchangeCount == 0)
+    }
+
+    @Test("The paste-mode restart never restarts again, even if it is handed a listener")
+    func restartHappensAtMostOnce() async {
+        let script = Script()
+        script.callbackCode = nil            // every callback in this test times out
+        script.pasteYieldsCallback = true    // …including the paste-mode restart's
+
+        let account = Account(label: "Work", accountUUID: "acct-A")
+        let vm = makeVM(script, accounts: [account], store: InMemoryAccountCredentialStore())
+
+        await vm.beginLogin(account.id)
+
+        // One loopback login plus exactly one paste restart. Without the caller's own bound
+        // this recurses for as long as the seam keeps timing out.
+        #expect(script.beginCalls.count == 2)
+        #expect(script.beginCalls.last?.forcePaste == true)
+        #expect(vm.pendingLogin == nil)
+        #expect(vm.loginState[account.id] == .idle)
     }
 
     @Test("Cancelling a loopback login stops its listener and shows no error")
