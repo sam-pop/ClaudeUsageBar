@@ -129,7 +129,10 @@ struct LoopbackServerTests {
     func callbackAtTheTimeoutInstant() async throws {
         let timeout: TimeInterval = 0.03
         for offsetMicroseconds in stride(from: -2500, through: 600, by: 100) {
-            let server = LoopbackServer(gracePeriod: 1)
+            // 5 s of grace, not 1: the only way this test can false-fail is a `try` throwing
+            // because a stall between the sleep and the write outlasted the grace period and
+            // the server cancelled the connection underneath it.
+            let server = LoopbackServer(gracePeriod: 5)
             let port = try await server.start()
             let client = try PortHog.connect(to: port)
             defer { client.close() }
@@ -254,9 +257,11 @@ private extension DispatchTime {
     /// `DispatchTime + Double` does the arithmetic, and handles the sweep's negative
     /// offsets.)
     var nanosecondsFromNow: UInt64 {
-        uptimeNanoseconds > DispatchTime.now().uptimeNanoseconds
-            ? uptimeNanoseconds - DispatchTime.now().uptimeNanoseconds
-            : 0
+        // One read of the clock, not two: comparing against one `now` and subtracting a
+        // second one lets the deadline pass in between, and the unsigned subtraction would
+        // then trap and take the whole test process down with it.
+        let now = DispatchTime.now().uptimeNanoseconds
+        return uptimeNanoseconds > now ? uptimeNanoseconds - now : 0
     }
 }
 

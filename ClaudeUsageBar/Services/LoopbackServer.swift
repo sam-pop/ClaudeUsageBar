@@ -74,6 +74,11 @@ actor LoopbackServer {
     /// Waits for `GET /callback?code=…&state=…` with `state == expectedState` and returns
     /// the code, or `nil` on timeout, on `stop()`, or if the server was never started.
     ///
+    /// `timeout` bounds how long this waits for a callback to be *accepted*, not the total
+    /// call duration: a callback accepted right at the boundary is always delivered, so a
+    /// successful return can legitimately arrive slightly after `timeout` has elapsed. A
+    /// caller must not treat "took longer than `timeout`" as a failure — read the result.
+    ///
     /// One login per instance: a second call — concurrent, or after this login was already
     /// settled by delivery or timeout — returns `nil` immediately rather than displacing the
     /// first waiter or waiting out a full timeout against a listener that can no longer be
@@ -117,10 +122,12 @@ actor LoopbackServer {
         // A live waiter does NOT mean no code is in flight: between the engine accepting a
         // callback and its `deliver` hop landing here, the waiter is still set. Only the
         // engine can settle that, so ask it synchronously — and if it says a code was
-        // already accepted, do nothing at all. That delivery is guaranteed to arrive
-        // (`respond` calls its completion even when the connection has gone), and resuming
-        // `nil` here would silently drop a single-use code while the browser reads
-        // "Logged in".
+        // already accepted, do nothing at all: resuming `nil` here would silently drop a
+        // single-use code while the browser reads "Logged in". That delivery is expected to
+        // arrive: `respond` calls its completion synchronously when the connection is
+        // already gone, and otherwise relies on `send` completing (including with an error).
+        // If that ever failed to fire, the wait would outlast its timeout until the caller
+        // calls `stop()`.
         guard engine.expire() else { return }
         isSpent = true
         finish(with: nil)
@@ -245,7 +252,9 @@ private final class LoopbackEngine: @unchecked Sendable {
     /// - Returns: `false` only when a callback has already been accepted and its code is on
     ///   its way to the actor (`.satisfied`); the caller must NOT report a timeout then, or
     ///   a single-use code would be dropped while the browser shows "Logged in". Every other
-    ///   phase returns `true`: nothing is in flight, so timing out is safe.
+    ///   phase returns `true`: either nothing has been accepted, or `stop()` has already
+    ///   settled the login and resumed the waiter itself — in neither case can reporting a
+    ///   timeout strand the caller.
     func expire() -> Bool {
         queue.sync {
             guard phase != .satisfied else { return false }
