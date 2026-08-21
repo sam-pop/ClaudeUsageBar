@@ -99,7 +99,7 @@ struct UsageMatrixView: View {
     private func freshness(_ column: AccountsViewModel.AccountView, needsReAuth: Bool, now: Date) -> some View {
         if needsReAuth {
             Button {
-                Task { await viewModel.rereadFromClaudeCode(column.account.id) }
+                Task { await viewModel.beginLogin(column.account.id) }
             } label: {
                 pill(text: "Refresh login", systemImage: "key.slash.fill", tint: .red)
             }

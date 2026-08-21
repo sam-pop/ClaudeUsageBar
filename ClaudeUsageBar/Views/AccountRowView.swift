@@ -146,7 +146,7 @@ struct AccountRowView: View {
             }
             if viewModel.needsReAuth[account.id] == true {
                 Button {
-                    Task { await viewModel.rereadFromClaudeCode(account.id) }
+                    Task { await viewModel.beginLogin(account.id) }
                 } label: {
                     Label("Re-read from Claude Code", systemImage: "key.fill")
                         .font(.system(size: 10, weight: .medium))

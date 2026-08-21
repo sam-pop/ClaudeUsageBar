@@ -93,7 +93,7 @@ struct UsagePopoverView: View {
     private var addAccountControls: some View {
         VStack(spacing: 4) {
             Button {
-                Task { await viewModel.addCurrentAccount() }
+                Task { await viewModel.beginLogin(nil) }
             } label: {
                 Label("Add current account", systemImage: "plus.circle")
                     .font(.system(size: 12, weight: .medium))

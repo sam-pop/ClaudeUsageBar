@@ -277,72 +277,344 @@ final class AccountsViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Account operations
+    // MARK: - Browser login
 
-    /// Captures whichever account Claude Code is currently logged into and adds it.
-    func addCurrentAccount() async {
-        addAccountError = nil
-        guard let creds = KeychainService.captureFromClaudeCode() else {
-            addAccountError = "Couldn't read Claude Code's login. Open Claude Code and sign in, then try again."
+    /// The loopback listener belonging to `pendingLogin`, when it has one.
+    private var loginServer: LoopbackServer?
+    /// Credentials from a login whose code has been exchanged but whose identity check
+    /// hasn't finished. Held in memory — never persisted — so `retryIdentity()` can re-run
+    /// just that step: the authorization code behind them is single-use and already spent.
+    private var unverifiedGrant: CachedCredentials?
+    /// Bumped whenever a login starts or ends. Each step captures it before an await and
+    /// rechecks after, so a login that was cancelled or restarted mid-flight can't write
+    /// state on top of the one that replaced it.
+    private var loginEpoch = 0
+    /// True between `deps.beginLogin` being called and `pendingLogin` being assigned — the
+    /// window in which `pendingLogin` alone would let a second login start.
+    private var isStartingLogin = false
+
+    /// Starts a browser OAuth login: `accountID` re-authenticates that account, `nil` adds a
+    /// new one. Returns once the login has reached a terminal state — or, in paste mode, once
+    /// the browser is open and `submitPaste(_:)` owns the rest.
+    ///
+    /// `forcePaste` starts in paste mode directly; a loopback timeout restarts this way on
+    /// its own.
+    func beginLogin(_ accountID: UUID?, forcePaste: Bool = false) async {
+        guard pendingLogin == nil, !isStartingLogin else {
+            // One browser session yields one account, so parallel logins would capture
+            // duplicates and produce errors that can't be attributed to either flow. A repeat
+            // request from the flow that is already running gets no message: its own state
+            // (waiting, or awaiting a paste) already says what is happening, and replacing
+            // that with a failure would strand a login that is still live.
+            if pendingLogin?.accountID != accountID {
+                setLoginState(.failed("Finish the login in progress first."), for: accountID)
+            }
             return
         }
-        guard creds.refreshToken != nil else {
-            addAccountError = "That login has no refresh token, so it can't be tracked. Re-login in Claude Code and retry."
+        await runLogin(accountID, forcePaste: forcePaste)
+    }
+
+    /// Finishes a paste-mode login from the `code#state` string Anthropic's callback page
+    /// renders.
+    func submitPaste(_ raw: String) async {
+        guard let pending = pendingLogin, pending.mode == .paste else { return }
+        guard let parsed = OAuthPaste.parse(raw) else {
+            setLoginState(.failed("That doesn't look like a login code — copy the whole line."),
+                          for: pending.accountID)
             return
         }
-
-        // Identity is required for dedupe + labeling.
-        let identity = try? await ProfileService.fetchIdentity(token: creds.accessToken)
-
-        // Dedupe on the stable account uuid.
-        if let uuid = identity?.uuid, let existing = accounts.first(where: { $0.accountUUID == uuid }) {
-            // Refresh the existing account's credentials rather than duplicating it.
-            try? credentials.update(id: existing.id, credentials: creds)
-            addAccountError = "“\(existing.label)” is already tracked — its login was refreshed."
-            await refresh(existing.id)
+        // The state binds the code to this login (anti-CSRF). The pending login is kept on
+        // rejection so a corrected paste can still finish it.
+        guard parsed.state == pending.pkce.state else {
+            setLoginState(.failed("That code doesn't match this login."), for: pending.accountID)
             return
         }
+        await finishLogin(code: parsed.code)
+    }
 
-        let label = identity?.displayName ?? identity?.email ?? "Account \(accounts.count + 1)"
-        let account = Account(label: label, accountUUID: identity?.uuid, email: identity?.email)
+    /// Abandons the pending login. `async` so its listener is stopped before this returns,
+    /// rather than at some later scheduling point.
+    func cancelLogin() async {
+        guard let pending = pendingLogin else { return }
+        await endLogin(.idle, for: pending.accountID)
+    }
+
+    /// Re-runs the identity check for a login whose grant is already in hand — the recovery
+    /// behind "couldn't verify the account". Re-running the exchange is not an option: that
+    /// code is spent.
+    func retryIdentity() async {
+        guard let pending = pendingLogin, let grant = unverifiedGrant else { return }
+        await verifyAndStore(grant, pending: pending)
+    }
+
+    private func runLogin(_ accountID: UUID?, forcePaste: Bool) async {
+        isStartingLogin = true
+        let started: (pending: PendingLogin, authorizeURL: URL,
+                      server: LoopbackServer?, callback: Task<String?, Never>?)
         do {
-            try credentials.update(id: account.id, credentials: creds)
+            started = try await deps.beginLogin(accountID, forcePaste, loginHintEmail(for: accountID))
+            isStartingLogin = false
         } catch {
-            addAccountError = "Couldn't save the account's credentials: \(error.localizedDescription)"
+            isStartingLogin = false
+            setLoginState(isCancellation(error) ? .idle : .failed("Couldn't start the login — try again."),
+                          for: accountID)
             return
         }
+
+        loginEpoch += 1
+        let epoch = loginEpoch
+        pendingLogin = started.pending
+        loginServer = started.server
+        setLoginState(started.pending.mode == .paste ? .awaitingPaste : .waitingForBrowser(since: deps.now()),
+                      for: accountID)
+        // Never log this URL: it carries the PKCE challenge and, on re-auth, a real email.
+        deps.openURL(started.authorizeURL)
+
+        // Paste mode has no listener to wait on — `submitPaste` finishes the login.
+        guard let callback = started.callback else { return }
+
+        let code = await callback.value
+        // Cancelled or restarted while waiting: whatever replaced this login owns the state.
+        guard epoch == loginEpoch else { return }
+        guard let code else {
+            // The wait timed out. `waitForCallback` bounds how long a callback may be
+            // *accepted*, not the total call duration, so a code accepted at the boundary
+            // still arrives non-nil above and is handled as the success it is; only nil gets
+            // here, and the fixed redirect URI means the retry has to be a brand-new login.
+            await endLogin(.idle, for: accountID)
+            // At most one restart: paste mode has no listener, so it cannot time out in turn.
+            // Guarding on the flag rather than on `begin` returning no callback keeps that
+            // true even if the seam ever hands a forced-paste login a listener anyway.
+            if !forcePaste { await runLogin(accountID, forcePaste: true) }
+            return
+        }
+        await finishLogin(code: code)
+    }
+
+    /// Second half of a login: turn the authorization code into credentials, then verify and
+    /// store them. Each failure is reported distinctly — collapsing them is what let a
+    /// network blip tell the user to go switch accounts.
+    private func finishLogin(code: String) async {
+        guard let pending = pendingLogin else { return }
+        // The code is in hand, so the listener has no further role: on the loopback path
+        // `begin`'s callback task has already stopped it, and this drops the reference.
+        await releaseLoginServer()
+        let epoch = loginEpoch
+
+        let grant: CachedCredentials
+        do {
+            grant = try await exchangeRetryingTransient(code: code, pending: pending)
+        } catch {
+            guard epoch == loginEpoch else { return }
+            guard !isCancellation(error) else {
+                // The user cancelled on purpose: there is nothing to report.
+                await endLogin(.idle, for: pending.accountID)
+                return
+            }
+            let message: String
+            switch error {
+            case OAuthLoginError.exchangeRejected:
+                message = "Login expired or was already used — try again."
+            case OAuthLoginError.malformedResponse:
+                // A 200 that doesn't decode is realistically a captive portal or a challenge
+                // page rather than the token endpoint.
+                message = "Got an unreadable response from the login server — try again."
+            default:
+                // `.transient` with its retry already spent, plus anything the seam raises
+                // from outside the taxonomy.
+                message = "Couldn't reach the login server — try again."
+            }
+            await endLogin(.failed(message), for: pending.accountID)
+            return
+        }
+        guard epoch == loginEpoch else { return }
+
+        unverifiedGrant = grant
+        await verifyAndStore(grant, pending: pending)
+    }
+
+    /// One retry on `.transient`, which covers transport failures (offline, timeout, DNS)
+    /// and any unexpected status, since the exchange classifier fails open to it.
+    private func exchangeRetryingTransient(code: String, pending: PendingLogin) async throws -> CachedCredentials {
+        do {
+            return try await deps.exchange(code, pending)
+        } catch OAuthLoginError.transient {
+            return try await deps.exchange(code, pending)
+        }
+    }
+
+    /// Identity is required: it is what stops one account's slot being overwritten with
+    /// another's login. Its two failure modes stay distinct — a fetch that failed says
+    /// nothing about which account the browser is signed into.
+    private func verifyAndStore(_ grant: CachedCredentials, pending: PendingLogin) async {
+        let epoch = loginEpoch
+        let identity: AccountIdentity
+        do {
+            identity = try await deps.fetchIdentity(grant.accessToken)
+        } catch {
+            guard epoch == loginEpoch else { return }
+            guard !isCancellation(error) else {
+                await endLogin(.idle, for: pending.accountID)
+                return
+            }
+            // The grant and the pending login stay in memory so `retryIdentity()` can re-run
+            // only this step.
+            setLoginState(.failed("Logged in, but couldn't verify the account — Retry."),
+                          for: pending.accountID)
+            return
+        }
+        guard epoch == loginEpoch else { return }
+
+        if let accountID = pending.accountID {
+            await completeReAuth(grant, accountID: accountID, identity: identity)
+        } else {
+            await completeAddAccount(grant, identity: identity)
+        }
+    }
+
+    private func completeReAuth(_ grant: CachedCredentials, accountID: UUID, identity: AccountIdentity) async {
+        guard let account = accounts.first(where: { $0.id == accountID }) else {
+            // No such account any more — removed while the browser was open — so there is no
+            // slot for this grant.
+            await endLogin(.idle, for: accountID)
+            return
+        }
+
+        if let expected = account.accountUUID {
+            guard identity.uuid == expected else {
+                let actual = identity.email ?? "a different account"
+                await endLogin(.failed("That browser is signed into \(actual) — expected “\(account.label)”."),
+                               for: accountID)
+                return
+            }
+            await storeAndFinish(grant, for: accountID, owner: accountID, notice: nil)
+            return
+        }
+
+        // A migrated account has no identity until a login supplies one. If that identity
+        // already belongs to another account, the credentials belong in that slot: applying
+        // the backfill here would leave two accounts claiming one identity.
+        let resolved = AccountIdentityResolver.backfill(accounts, id: accountID,
+                                                        uuid: identity.uuid, email: identity.email)
+        if resolved.duplicateOfLabel != nil,
+           let duplicate = accounts.first(where: { $0.id != accountID && $0.accountUUID == identity.uuid }) {
+            await storeAndFinish(
+                grant, for: duplicate.id, owner: accountID,
+                notice: "That login is already tracked as “\(duplicate.label)” — its login was refreshed instead.")
+            return
+        }
+        accounts = resolved.accounts
+        accountsStore.save(accounts)
+        await storeAndFinish(grant, for: accountID, owner: accountID, notice: nil)
+    }
+
+    private func completeAddAccount(_ grant: CachedCredentials, identity: AccountIdentity) async {
+        // Dedupe on the stable account uuid: logging into an account that is already tracked
+        // refreshes it instead of creating a second copy.
+        if let existing = accounts.first(where: { $0.accountUUID == identity.uuid }) {
+            await storeAndFinish(grant, for: existing.id, owner: nil,
+                                 notice: "“\(existing.label)” is already tracked — its login was refreshed.")
+            return
+        }
+
+        let label = identity.displayName ?? identity.email ?? "Account \(accounts.count + 1)"
+        let account = Account(label: label, accountUUID: identity.uuid, email: identity.email)
+        guard await storeGrant(grant, for: account.id, owner: nil) else { return }
         accounts.append(account)
         accountsStore.save(accounts)
         attachRuntime(for: account)
-        await refresh(account.id)
+        await endLogin(.idle, for: nil)
+        notifyLoginSucceeded(accountID: account.id)
+        await runtimes[account.id]?.credentialsReplaced()
     }
 
-    /// Re-captures an account's credentials from Claude Code — the recovery path when its
-    /// refresh token has died. Identity-guarded: refuses if Claude Code is logged into a
-    /// different account, so account A can never be silently overwritten with B's login.
-    func rereadFromClaudeCode(_ id: UUID) async {
-        addAccountError = nil
-        guard let account = accounts.first(where: { $0.id == id }) else { return }
-        guard let creds = KeychainService.captureFromClaudeCode(), creds.refreshToken != nil else {
-            addAccountError = "Couldn't read a usable login from Claude Code. Sign in there and retry."
-            return
-        }
-
-        let identity = try? await ProfileService.fetchIdentity(token: creds.accessToken)
-        if let expected = account.accountUUID {
-            guard identity?.uuid == expected else {
-                addAccountError = "Claude Code is logged into a different account. Switch to “\(account.label)” first."
-                return
-            }
-        }
-
-        try? credentials.update(id: id, credentials: creds)
-        // Backfill identity for a legacy-migrated account that never had it.
-        if account.accountUUID == nil, let identity {
-            updateAccount(id) { $0.accountUUID = identity.uuid; $0.email = identity.email }
-        }
-        await refresh(id)
+    /// The shared tail of a login that landed on an existing account.
+    /// - Parameters:
+    ///   - owner: the flow this login was started from (`nil` = the add-account flow), which
+    ///     differs from `accountID` when a login turns out to belong to another account.
+    ///   - notice: what to tell the user when the login didn't do what they asked — it rides
+    ///     on `.failed` because that is the only state carrying a message.
+    private func storeAndFinish(_ grant: CachedCredentials, for accountID: UUID,
+                                owner: UUID?, notice: String?) async {
+        guard await storeGrant(grant, for: accountID, owner: owner) else { return }
+        needsReAuth[accountID] = false
+        await endLogin(notice.map(LoginState.failed) ?? .idle, for: owner)
+        notifyLoginSucceeded(accountID: accountID)
+        await runtimes[accountID]?.credentialsReplaced()
     }
+
+    /// Stores a verified grant, or surfaces the one terminal failure a repeat login cannot
+    /// fix. Never `try?`: a save that silently didn't land leaves the account looking logged
+    /// out forever with nothing to explain it.
+    /// - Returns: whether the credentials actually landed.
+    private func storeGrant(_ grant: CachedCredentials, for accountID: UUID, owner: UUID?) async -> Bool {
+        do {
+            try credentials.update(id: accountID, credentials: grant)
+            return true
+        } catch {
+            await endLogin(.failed("Logged in, but couldn't store it — keychain unreadable."), for: owner)
+            return false
+        }
+    }
+
+    /// Ends the pending login and parks the owning flow in `state`. The epoch bump is what
+    /// turns a step of the finished login that is still awaiting into a no-op, so it happens
+    /// before the listener is stopped — `stop()` resumes a waiting callback with `nil`, and
+    /// that resumption must not be read as a timeout.
+    private func endLogin(_ state: LoginState, for owner: UUID?) async {
+        pendingLogin = nil
+        unverifiedGrant = nil
+        loginEpoch += 1
+        setLoginState(state, for: owner)
+        await releaseLoginServer()
+    }
+
+    /// Stops this login's loopback listener, if it had one. `begin`'s callback task stops the
+    /// server on success only; every other terminal outcome — timeout restart, cancel, or a
+    /// failure that abandons the login — has to stop it here, or the listener stays bound.
+    /// `stop()` is idempotent, so calling it after a success costs nothing and keeps this the
+    /// single release point.
+    private func releaseLoginServer() async {
+        guard let server = loginServer else { return }
+        loginServer = nil
+        await server.stop()
+    }
+
+    private func setLoginState(_ state: LoginState, for accountID: UUID?) {
+        if let accountID { loginState[accountID] = state } else { addLoginState = state }
+    }
+
+    /// The email claude.ai should preselect, when this login re-auths an account whose
+    /// address we know. A blank stored email is normalized to `nil` so the authorize URL
+    /// never carries an empty `login_hint`.
+    private func loginHintEmail(for accountID: UUID?) -> String? {
+        guard let accountID,
+              let email = accounts.first(where: { $0.id == accountID })?.email else { return nil }
+        let trimmed = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Whether an error out of the login seam means "the user cancelled", not "the login
+    /// failed". `OAuthLoginService.exchange` rethrows the raw error when its task is
+    /// cancelled, so cancellation arrives as `CancellationError` or `URLError.cancelled`
+    /// rather than as one of `OAuthLoginError`'s cases.
+    private func isCancellation(_ error: Error) -> Bool {
+        if Task.isCancelled || error is CancellationError { return true }
+        return (error as? URLError)?.code == .cancelled
+    }
+
+    /// The popover closes as soon as the browser takes focus, so a notification is the only
+    /// way the user learns a login landed.
+    private func notifyLoginSucceeded(accountID: UUID) {
+        let label = accounts.first(where: { $0.id == accountID })?.label ?? "Account"
+        let content = UNMutableNotificationContent()
+        content.title = "\(label): logged in"
+        content.body = "Usage tracking is active for this account."
+        deps.addNotification(UNNotificationRequest(
+            identifier: "login-\(accountID.uuidString)", content: content, trigger: nil))
+    }
+
+    // MARK: - Account operations
 
     func remove(_ id: UUID) {
         // Stop first so an in-flight refresh can't re-create the slot after deletion.
