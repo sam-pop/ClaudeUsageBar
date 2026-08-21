@@ -111,6 +111,17 @@ final class AccountRuntime {
         refreshTask = nil
     }
 
+    /// Called after new credentials have been stored for this account (e.g. a fresh
+    /// browser login). Resets the circuit breaker to a fresh un-tripped state — the prior
+    /// breaker may still be tripped from the dead-token era and would otherwise keep
+    /// blocking refresh attempts for up to its re-arm window even though the new
+    /// credentials are known-good — clears `needsReAuth`, and re-fetches.
+    func credentialsReplaced() async {
+        breaker = RefreshCircuitBreaker()
+        needsReAuth = false
+        await refresh()
+    }
+
     // MARK: - Fetch with retry + OAuth refresh
 
     private func fetchWithRetry() async throws -> UsageSnapshot {
@@ -151,7 +162,14 @@ final class AccountRuntime {
     /// Returns the new credentials on success, `nil` on failure.
     private func tryTokenRefresh(_ creds: CachedCredentials) async -> CachedCredentials? {
         do {
-            let refreshed = try await deps.refreshToken(creds)
+            var refreshed = try await deps.refreshToken(creds)
+            // A refresh response that omits refresh_token_expires_in must not be read as
+            // "expiry unknown" — carry forward the prior value so the rolling ~28-day
+            // refresh-token expiry (and its pre-expiry warning) survive a response that
+            // simply didn't repeat the field.
+            if refreshed.refreshTokenExpiresAt == nil {
+                refreshed.refreshTokenExpiresAt = creds.refreshTokenExpiresAt
+            }
             breaker.recordSuccess()
             try? credentials.update(id: id, credentials: refreshed)
             return refreshed

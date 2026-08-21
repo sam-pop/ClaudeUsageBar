@@ -111,4 +111,84 @@ struct AccountRuntimeTests {
         }
         #expect(runtime.snapshot == nil)
     }
+
+    @Test("credentialsReplaced resets a tripped breaker, clears needsReAuth, and refreshes")
+    func credentialsReplacedResetsBreakerAndRefreshes() async throws {
+        let defaults = ephemeralDefaults()
+        let id = UUID()
+        let store = InMemoryAccountCredentialStore([
+            id: CachedCredentials(accessToken: "sk-ant-oat01-dead", refreshToken: "r-old", expiresAt: nil)
+        ])
+        let manager = AccountCredentialManager(store: store)
+
+        // Three consecutive rejections trip the breaker at t0; its 600s re-arm window
+        // means `allowsAttempt` stays false for a long time unless something resets it.
+        var trippedBreaker = RefreshCircuitBreaker()
+        trippedBreaker.record(.rejected, now: t0)
+        trippedBreaker.record(.rejected, now: t0)
+        trippedBreaker.record(.rejected, now: t0)
+
+        var refreshCalls = 0
+        let deps = AccountRuntime.Dependencies(
+            fetchUsage: { token in
+                // The dead token always 401s; the fresh one (post credentialsReplaced) succeeds.
+                if token == "sk-ant-oat01-dead" { throw UsageAPIError.invalidResponse(401) }
+                return self.response(five: 10, seven: 20)
+            },
+            refreshToken: { old in
+                refreshCalls += 1
+                return CachedCredentials(accessToken: "sk-ant-oat01-fresh",
+                                         refreshToken: old.refreshToken, expiresAt: nil)
+            },
+            now: { self.t0 }   // fixed at t0 — still inside the tripped breaker's re-arm window
+        )
+        let runtime = AccountRuntime(id: id, credentials: manager,
+                                     persistence: AccountPersistence(defaults: defaults, accountID: id),
+                                     deps: deps, breaker: trippedBreaker)
+
+        // While tripped, the breaker blocks the refresh attempt entirely.
+        await runtime.refresh()
+        #expect(runtime.needsReAuth == true)
+        #expect(refreshCalls == 0)
+
+        await runtime.credentialsReplaced()
+
+        #expect(runtime.needsReAuth == false)
+        #expect(refreshCalls == 1)
+        #expect(runtime.snapshot?.fiveHourPercent == 10)
+    }
+
+    @Test("tryTokenRefresh preserves the previous refreshTokenExpiresAt when the response omits it")
+    func carriesForwardRefreshTokenExpiresAt() async throws {
+        let defaults = ephemeralDefaults()
+        let id = UUID()
+        let oldExpiry = Date(timeIntervalSince1970: 2_000_000)
+        let store = InMemoryAccountCredentialStore([
+            id: CachedCredentials(accessToken: "sk-ant-oat01-old", refreshToken: "r",
+                                  expiresAt: nil, refreshTokenExpiresAt: oldExpiry)
+        ])
+        let manager = AccountCredentialManager(store: store)
+
+        let deps = AccountRuntime.Dependencies(
+            fetchUsage: { token in
+                if token == "sk-ant-oat01-old" { throw UsageAPIError.invalidResponse(401) }
+                return self.response(five: 5, seven: 5)
+            },
+            refreshToken: { old in
+                // Simulates a refresh response that omits refresh_token_expires_in.
+                CachedCredentials(accessToken: "sk-ant-oat01-new", refreshToken: old.refreshToken,
+                                  expiresAt: nil, refreshTokenExpiresAt: nil)
+            },
+            now: { self.t0 }
+        )
+        let runtime = AccountRuntime(id: id, credentials: manager,
+                                     persistence: AccountPersistence(defaults: defaults, accountID: id),
+                                     deps: deps)
+
+        await runtime.refresh()
+
+        let saved = try manager.credentials(for: id)
+        #expect(saved?.accessToken == "sk-ant-oat01-new")
+        #expect(saved?.refreshTokenExpiresAt == oldExpiry)
+    }
 }
