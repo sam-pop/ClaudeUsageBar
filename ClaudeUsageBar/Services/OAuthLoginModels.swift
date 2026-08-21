@@ -29,7 +29,8 @@ enum OAuthEndpoints {
     static let authorize = "https://claude.ai/oauth/authorize"
     static let token = "https://console.anthropic.com/v1/oauth/token"
     /// The single parsed-`URL` form of `token`. Both `OAuthLoginService` (fresh login) and
-    /// `KeychainService` (refresh) POST here; this is the one place the force-unwrap happens.
+    /// `KeychainService` (refresh) POST here; this is the one place the token URL's
+    /// force-unwrap happens.
     static let tokenURL = URL(string: token)!
     /// Anthropic's own callback page for paste mode: it renders a `code#state` string
     /// for the user to copy back into the app, instead of redirecting to a local port.

@@ -21,11 +21,13 @@ enum OAuthExchange {
     /// `CachedCredentials`. Only 429 (rate_limit_error) and 400 `invalid_grant` were
     /// directly observed in the design spike. 401/403 are treated as terminal by
     /// deliberate choice, not observation, to match `OAuthRefreshOutcome`'s existing set
-    /// for the sibling refresh path — note that a 403 from these Cloudflare-fronted hosts
-    /// has separately been seen to be a bot challenge rather than a dead grant, so this
-    /// default is a judgment call, not a guarantee. Everything else (including any
-    /// unrecognized status) fails open to `.transient`, so a single unexpected response
-    /// never strands the user — same policy `OAuthRefreshOutcome` documents for refresh.
+    /// for the sibling refresh path. Cloudflare fronts these hosts and has returned 403 to
+    /// spike probes of routes this client doesn't have (S10), so a 403 here is not
+    /// necessarily a dead grant — treating it as terminal is a judgment call for
+    /// consistency with `OAuthRefreshOutcome`, not a guarantee. Everything else (including
+    /// any unrecognized status) fails open to `.transient`, so a single unexpected
+    /// response never strands the user — same policy `OAuthRefreshOutcome` documents for
+    /// refresh.
     static func credentials(fromStatus status: Int, body: Data, now: Date = Date()) throws -> CachedCredentials {
         switch status {
         case 200...299:
@@ -71,8 +73,8 @@ struct OAuthLoginService {
         // `URLSession.data(for:)` throws for transport-level failures (offline, timeout,
         // DNS, TLS, a dropped Wi-Fi/VPN mid-flight) — none of which say anything about
         // whether the code itself is good, so they're transient, not a rejection. The
-        // one exception is cancellation: a user-initiated cancel must not be retried or
-        // reported as a transient server condition.
+        // one exception is cancellation: a cancelled task must not be retried or reported
+        // as a transient server condition.
         let data: Data
         let response: URLResponse
         do {
