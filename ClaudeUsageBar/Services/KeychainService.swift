@@ -25,11 +25,6 @@ enum KeychainServiceError: Error {
 }
 
 enum KeychainService {
-    private static let oauthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-    /// Single source of truth for the token endpoint URL is `OAuthEndpoints.token`
-    /// (`OAuthLoginModels.swift`); this force-unwrap mirrors the one already taken there.
-    private static var oauthTokenURL: URL { URL(string: OAuthEndpoints.token)! }
-
     /// Where the app persists its own copy of the credentials. Injectable seam for tests.
     /// `nonisolated(unsafe)`: the value is Sendable and only tests mutate it, from a single
     /// thread — production code assigns it once at process start.
@@ -100,7 +95,7 @@ enum KeychainService {
     /// the per-account store own persistence; `refreshAccessToken` wraps it for the legacy
     /// single-store path.
     static func performOAuthRefresh(refreshToken: String) async throws -> CachedCredentials {
-        var request = URLRequest(url: oauthTokenURL)
+        var request = URLRequest(url: OAuthEndpoints.tokenURL)
         request.httpMethod = "POST"
         request.timeoutInterval = 10
         request.setValue("application/json", forHTTPHeaderField: "content-type")
@@ -110,7 +105,7 @@ enum KeychainService {
         let body: [String: String] = [
             "grant_type": "refresh_token",
             "refresh_token": refreshToken,
-            "client_id": oauthClientID
+            "client_id": OAuthEndpoints.clientID
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
