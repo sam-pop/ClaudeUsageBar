@@ -43,7 +43,7 @@ struct OAuthLoginServiceTests {
         #expect(plainItems.first { $0.name == "login_hint" } == nil)
     }
 
-    @Test("A successful bind selects loopback mode with a 127.0.0.1 redirect on the bound port")
+    @Test("A successful bind selects loopback mode with a localhost redirect on the bound port")
     func loopbackSuccessSelectsLoopback() async throws {
         let id = UUID()
         let fixedNow = Date(timeIntervalSince1970: 1_700_000_000)
@@ -54,14 +54,14 @@ struct OAuthLoginServiceTests {
             await result.server?.stop()
             return
         }
-        #expect(result.pending.redirectURI == "http://127.0.0.1:\(port)/callback")
+        #expect(result.pending.redirectURI == "http://localhost:\(port)/callback")
         #expect(result.pending.accountID == id)
         #expect(result.pending.startedAt == fixedNow)
         #expect(result.server != nil)
         #expect(result.callback != nil)
 
         let items = URLComponents(url: result.authorizeURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        #expect(items.first { $0.name == "redirect_uri" }?.value == "http://127.0.0.1:\(port)/callback")
+        #expect(items.first { $0.name == "redirect_uri" }?.value == "http://localhost:\(port)/callback")
         #expect(items.first { $0.name == "login_hint" }?.value == "sam@example.com")
 
         // Tear down: resumes the already-enqueued `callback` wait with nil instead of leaving a

@@ -101,9 +101,13 @@ extension OAuthLoginService {
     ///
     /// `forcePaste: true` always selects paste mode: no server, `redirectURI =
     /// OAuthEndpoints.pasteRedirect`. Otherwise a `LoopbackServer` is started; on success the
-    /// mode is `.loopback(port:)` with the `127.0.0.1` (not `localhost`) redirect — `LoopbackServer`
-    /// binds IPv4 loopback only, and pinning the literal avoids a `localhost` resolution to
-    /// `::1` hitting connection-refused. A `StartError.bindFailed` falls back to paste mode
+    /// mode is `.loopback(port:)` with a **`localhost`** redirect. This is not a style choice:
+    /// the authorization server rejects `http://127.0.0.1:<port>/callback` for this client with
+    /// "Redirect URI … is not supported by client", observed live. `localhost` is the form the
+    /// Phase-0 spike proved returns HTTP 200. Note `LoopbackServer` binds IPv4 loopback only,
+    /// so a browser that resolved `localhost` to `::1` first would hit connection-refused;
+    /// that has not been observed, and the server leaves no alternative.
+    /// A `StartError.bindFailed` falls back to paste mode
     /// instead of throwing: a fresh login always produces *some* usable mode. Any other error
     /// from `start()` (none is currently possible, per its own contract) propagates instead of
     /// being silently treated as a fallback.
@@ -170,7 +174,7 @@ extension OAuthLoginService {
 
         let pending = PendingLogin(
             accountID: accountID, mode: .loopback(port: port), pkce: pkce,
-            redirectURI: "http://127.0.0.1:\(port)/callback", startedAt: now())
+            redirectURI: "http://localhost:\(port)/callback", startedAt: now())
         let expectedState = pkce.state
         let callback = Task<String?, Never> {
             let code = await server.waitForCallback(expectedState: expectedState, timeout: Self.loopbackTimeout)
