@@ -14,6 +14,10 @@ final class AccountsViewModel: ObservableObject {
     @Published private(set) var snapshots: [UUID: UsageSnapshot] = [:]
     @Published private(set) var runtimeStates: [UUID: AccountRuntime.LoadingState] = [:]
     @Published private(set) var needsReAuth: [UUID: Bool] = [:]
+    /// Mirrors each account's `AccountRuntime.refreshTokenExpiresAt`, refreshed alongside its
+    /// usage fetch — never read from the keychain directly, so a view can consult this on
+    /// every render without triggering I/O of its own. Absent key == unknown, same as nil.
+    @Published private(set) var refreshTokenExpiresAt: [UUID: Date] = [:]
     @Published var addAccountError: String?
     @Published var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled
     @Published var launchAtLoginError: String?
@@ -194,6 +198,7 @@ final class AccountsViewModel: ObservableObject {
         let snapshot: UsageSnapshot?
         let state: AccountRuntime.LoadingState
         let history: [UsageDataPoint]
+        let refreshTokenExpiresAt: Date?
     }
 
     var accountViews: [AccountView] {
@@ -202,7 +207,8 @@ final class AccountsViewModel: ObservableObject {
                 account: account,
                 snapshot: snapshots[account.id],
                 state: runtimeStates[account.id] ?? .idle,
-                history: runtimes[account.id]?.history ?? []
+                history: runtimes[account.id]?.history ?? [],
+                refreshTokenExpiresAt: refreshTokenExpiresAt[account.id]
             )
         }
     }
@@ -238,6 +244,9 @@ final class AccountsViewModel: ObservableObject {
             now: deps.now,
             onThresholdCrossing: { [weak self] crossing in
                 self?.sendNotification(account: account, crossing: crossing)
+            },
+            onLoginExpiryCrossing: { [weak self] daysRemaining in
+                self?.sendLoginExpiryNotification(account: account, daysRemaining: daysRemaining)
             }
         )
         let runtime = AccountRuntime(
@@ -258,6 +267,7 @@ final class AccountsViewModel: ObservableObject {
         snapshots[id] = runtime.snapshot
         runtimeStates[id] = runtime.state
         needsReAuth[id] = runtime.needsReAuth
+        refreshTokenExpiresAt[id] = runtime.refreshTokenExpiresAt
 
         // A migrated account starts with no identity (migration is offline). Backfill it
         // from the profile endpoint on its first successful refresh — the token is known
@@ -765,6 +775,7 @@ final class AccountsViewModel: ObservableObject {
         snapshots[id] = nil
         runtimeStates[id] = nil
         needsReAuth[id] = nil
+        refreshTokenExpiresAt[id] = nil
         loginState[id] = nil
         try? credentials.remove(id: id)
         accounts.removeAll { $0.id == id }
@@ -820,6 +831,24 @@ final class AccountsViewModel: ObservableObject {
 
         let request = UNNotificationRequest(
             identifier: "usage-\(account.id.uuidString)-\(windowKey)-\(crossing.threshold)",
+            content: content,
+            trigger: nil
+        )
+        deps.addNotification(request)
+    }
+
+    /// The pre-expiry warning for a refresh token about to die — the proactive nudge for the
+    /// "closed for weeks, or a token already dead" case this notifier exists for.
+    private nonisolated func sendLoginExpiryNotification(account: Account, daysRemaining: Int) {
+        let content = UNMutableNotificationContent()
+        content.title = "\(account.label): login expiring soon"
+        content.body = daysRemaining <= 1
+            ? "Log in again soon — this account's login expires within a day."
+            : "Log in again soon — this account's login expires in \(daysRemaining) days."
+        content.sound = .default
+
+        let request = UNNotificationRequest(
+            identifier: "login-expiry-\(account.id.uuidString)-\(daysRemaining)",
             content: content,
             trigger: nil
         )

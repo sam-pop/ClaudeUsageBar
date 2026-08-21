@@ -23,6 +23,11 @@ struct AccountRowView: View {
             // behind an "Updated 3h ago" line that looked healthy.
             LoginPill(viewModel: viewModel, accountID: account.id)
 
+            // Only worth showing once the pill above has nothing to say: a dead or
+            // recovering login already explains itself, and the countdown would just be
+            // noise beside it.
+            loginExpiryWarning
+
             if let snapshot = accountView.snapshot {
                 usageSections(snapshot)
                 if let limits = snapshot.modelLimits, !limits.isEmpty {
@@ -81,6 +86,26 @@ struct AccountRowView: View {
                     isEditing = false
                 }
                 .controlSize(.mini).buttonStyle(.borderedProminent)
+            }
+        }
+    }
+
+    // MARK: - Login expiry
+
+    @ViewBuilder
+    private var loginExpiryWarning: some View {
+        if viewModel.loginAffordance(for: account.id) == .none {
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                if let warning = LoginExpiry.warning(
+                    refreshTokenExpiresAt: accountView.refreshTokenExpiresAt, now: context.date
+                ) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "clock.badge.exclamationmark")
+                            .font(.system(size: 9)).foregroundStyle(.orange)
+                        Text(warning).font(.caption2).foregroundStyle(.orange)
+                        Spacer(minLength: 0)
+                    }
+                }
             }
         }
     }

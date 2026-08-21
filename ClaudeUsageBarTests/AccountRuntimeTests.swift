@@ -263,6 +263,62 @@ struct AccountRuntimeTests {
         #expect(saved?.refreshTokenExpiresAt == newExpiry)
     }
 
+    @Test("refresh() mirrors the stored refreshTokenExpiresAt without a second keychain read")
+    func mirrorsRefreshTokenExpiresAt() async throws {
+        let defaults = ephemeralDefaults()
+        let id = UUID()
+        let expiry = Date(timeIntervalSince1970: 2_000_000)
+        let store = InMemoryAccountCredentialStore([
+            id: CachedCredentials(accessToken: "sk-ant-oat01-tok", refreshToken: "r",
+                                  expiresAt: nil, refreshTokenExpiresAt: expiry)
+        ])
+        let manager = AccountCredentialManager(store: store)
+        let deps = AccountRuntime.Dependencies(
+            fetchUsage: { _ in self.response(five: 10, seven: 10) },
+            refreshToken: { $0 },
+            now: { self.t0 }
+        )
+        let runtime = AccountRuntime(id: id, credentials: manager,
+                                     persistence: AccountPersistence(defaults: defaults, accountID: id),
+                                     deps: deps)
+
+        #expect(runtime.refreshTokenExpiresAt == nil)   // nothing read yet — no I/O at init
+        await runtime.refresh()
+        #expect(runtime.refreshTokenExpiresAt == expiry)
+    }
+
+    @Test("Login-expiry thresholds fire once per crossing across repeated 60-second refreshes")
+    func loginExpiryFiresOncePerThreshold() async throws {
+        let defaults = ephemeralDefaults()
+        let id = UUID()
+        // Fixed 2 days remaining at every refresh — exactly the repeated tick a naive
+        // implementation would re-notify on every time.
+        let expiry = t0.addingTimeInterval(2 * 86400)
+        let store = InMemoryAccountCredentialStore([
+            id: CachedCredentials(accessToken: "sk-ant-oat01-tok", refreshToken: "r",
+                                  expiresAt: nil, refreshTokenExpiresAt: expiry)
+        ])
+        let manager = AccountCredentialManager(store: store)
+        var crossings: [Int] = []
+        let deps = AccountRuntime.Dependencies(
+            fetchUsage: { _ in self.response(five: 10, seven: 10) },
+            refreshToken: { $0 },
+            now: { self.t0 },
+            onLoginExpiryCrossing: { crossings.append($0) }
+        )
+        let runtime = AccountRuntime(id: id, credentials: manager,
+                                     persistence: AccountPersistence(defaults: defaults, accountID: id),
+                                     deps: deps)
+
+        await runtime.refresh()
+        await runtime.refresh()
+        await runtime.refresh()
+
+        // Three 60-second-apart refreshes at the same remaining-days count fire the 3-day
+        // threshold exactly once, not three times.
+        #expect(crossings == [3])
+    }
+
     @Test("A stale refresh in flight when credentialsReplaced runs does not clobber the fresh state")
     func staleRefreshDoesNotClobberFreshState() async throws {
         let defaults = ephemeralDefaults()

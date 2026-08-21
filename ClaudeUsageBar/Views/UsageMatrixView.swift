@@ -100,6 +100,12 @@ struct UsageMatrixView: View {
         // how stale the numbers are matters less than the fact that they've stopped updating.
         if viewModel.loginAffordance(for: column.account.id) != .none {
             LoginPill(viewModel: viewModel, accountID: column.account.id, layout: .compact)
+        } else if let warning = LoginExpiry.warning(refreshTokenExpiresAt: column.refreshTokenExpiresAt, now: now) {
+            HStack(spacing: 3) {
+                Image(systemName: "clock.badge.exclamationmark").font(.system(size: 8))
+                Text(warning).font(.system(size: 9, weight: .medium))
+            }
+            .foregroundStyle(.orange)
         } else if let snapshot = column.snapshot {
             let stale = now.timeIntervalSince(snapshot.fetchedAt) > 300
             let ago = UsageFormatting.lastUpdatedText(since: snapshot.fetchedAt, now: now)
