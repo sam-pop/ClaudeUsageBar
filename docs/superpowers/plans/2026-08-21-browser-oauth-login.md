@@ -527,7 +527,9 @@ struct OAuthLoginServiceTests {
         #expect(pending.mode == .paste)
         #expect(pending.redirectURI == OAuthEndpoints.pasteRedirect)
         #expect(server == nil)
-        #expect(url.absoluteString.contains("console.anthropic.com/oauth/code/callback".addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "") || url.query?.contains("redirect_uri") == true)
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let redirect = items.first { $0.name == "redirect_uri" }?.value
+        #expect(redirect == OAuthEndpoints.pasteRedirect)
     }
 }
 ```
