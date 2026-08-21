@@ -284,7 +284,8 @@ extension PendingLogin {
 - Test: `ClaudeUsageBarTests/OAuthPasteParseTests.swift`
 
 **Interfaces:**
-- Produces: `enum OAuthPaste { static func parse(_ raw: String) -> (code: String, state: String)? }` — splits on `#`, trims whitespace, rejects empty halves and over-long input (cap 8192).
+- Produces: `enum OAuthPaste { static func parse(_ raw: String) -> (code: String, state: String)? }` — splits on the FIRST `#`, trims surrounding whitespace, rejects empty halves and over-long input (cap 8192).
+- **Amended after the Task 4 review:** also rejects input where either half contains internal whitespace. Without this, a clipboard-wrapped newline yields a corrupted code that only fails later at the token endpoint, surfacing as "Login expired or was already used" — a misleading error, the exact failure class this feature exists to eliminate. Deliberately NOT full base64url charset validation: we have one real sample of Anthropic's code format, and rejecting an unexpected-but-legitimate character would break logins outright, which is worse than a late error. Whitespace is unambiguously a paste artifact.
 
 - [ ] **Step 1: Write the failing test:**
 
@@ -537,7 +538,9 @@ struct OAuthLoginServiceTests {
 (If a loopback round-trip in a unit test is undesirable on CI, keep the loopback branch covered by Task 6's server test + a Task 9 flow test with an injected fake, and unit-test only the paste branch here.)
 
 - [ ] **Step 2: Run** — Expected: FAIL.
-- [ ] **Step 3: Implement** `begin`: generate `OAuthPKCE`; if `forcePaste`, build a `.paste` PendingLogin with `redirectURI = OAuthEndpoints.pasteRedirect`, server nil; else construct a `LoopbackServer`, `try start()` → on success `.loopback(port:)` with `redirectURI = "http://localhost:\(port)/callback"`, on `StartError.bindFailed` fall back to paste. Return the pending, `pending.authorizeURL(loginHintEmail:)` is called by the caller (which knows the account email), and the server. **Do not open the browser here** — the view model opens via injected `openURL` (testability). Adjust the tuple/signature accordingly if cleaner.
+- [ ] **Step 3: Implement** `begin`: generate `OAuthPKCE`; if `forcePaste`, build a `.paste` PendingLogin with `redirectURI = OAuthEndpoints.pasteRedirect`, server nil; else construct a `LoopbackServer`, `try start()` → on success `.loopback(port:)` with **`redirectURI = "http://127.0.0.1:\(port)/callback"`**, on `StartError.bindFailed` fall back to paste.
+  - **Use the `127.0.0.1` literal, NOT `localhost`** (changed after the Task 6 review). The listener binds IPv4 loopback only — confirmed with `lsof` — so if a browser resolved `localhost` to `::1` first it would hit connection-refused and the login would die with a dead tab. The IP literal removes the ambiguity. This is safe: spike S3 confirmed `http://127.0.0.1/callback` is a registered redirect URI for this client (the client metadata lists both `http://localhost/callback` and `http://127.0.0.1/callback`, port-agnostic), and §4 of the design spec already stated this preference.
+  - **Ordering the API cannot enforce:** `waitForCallback` must be armed BEFORE the browser is opened. Until the wait arms the listener, a callback is answered `404` like any stray request, burning a single-use code. Structure `beginLogin` so the wait is started first, then `openURL`. Return the pending, `pending.authorizeURL(loginHintEmail:)` is called by the caller (which knows the account email), and the server. **Do not open the browser here** — the view model opens via injected `openURL` (testability). Adjust the tuple/signature accordingly if cleaner.
 - [ ] **Step 4: Run** — Expected: PASS.
 - [ ] **Step 5: Commit** — `feat: OAuth login mode selection`
 
@@ -553,7 +556,12 @@ struct OAuthLoginServiceTests {
 - Produces on `AccountsViewModel`:
   ```swift
   struct Dependencies {
-      var beginLogin: (_ accountID: UUID?, _ forcePaste: Bool) throws -> (PendingLogin, URL, LoopbackServer?)
+      // UPDATED to the real Task 7 API — the earlier 3-tuple/non-async shape is stale.
+      // `callback` is an ALREADY-ARMED wait: Task 7 starts waitForCallback before returning,
+      // which is what makes the arm-before-browser hazard structurally impossible. Task 9
+      // must `await result.callback?.value` and must NEVER call waitForCallback itself.
+      var beginLogin: (_ accountID: UUID?, _ forcePaste: Bool, _ loginHintEmail: String?) async throws
+          -> (pending: PendingLogin, authorizeURL: URL, server: LoopbackServer?, callback: Task<String?, Never>?)
       var exchange: (_ code: String, _ pending: PendingLogin) async throws -> CachedCredentials
       var fetchIdentity: (_ token: String) async throws -> AccountIdentity
       var openURL: (URL) -> Void
@@ -638,15 +646,19 @@ func serial() async { /* start one (fake begin returns loopback but never comple
 - [ ] **Step 2: Run** — Expected: FAIL.
 - [ ] **Step 3: Implement** `beginLogin`:
   - Refuse if `pendingLogin != nil` (set a "finish the login in progress" failure on the target's state).
-  - `deps.beginLogin(accountID, false)` → set `pendingLogin`, `loginState[id] = .waitingForBrowser(since: now)`, `deps.openURL(pending.authorizeURL(loginHintEmail: emailFor(accountID)))`.
-  - Loopback: `await server.waitForCallback(expectedState: pkce.state, timeout: 600)`. nil → restart as paste: `deps.beginLogin(accountID, true)`, set `.awaitingPaste`, reopen URL. Non-nil → `finishLogin(code:)`.
-  - `finishLogin(code:)`: `try deps.exchange(...)` (catch `.transient`→retry once, `.exchangeRejected`→`.failed("Login expired or was already used — try again.")`); then identity (required):
+  - `let result = try await deps.beginLogin(accountID, false, emailFor(accountID))` → set `pendingLogin`, `loginState[id] = .waitingForBrowser(since: now)`, then `deps.openURL(result.authorizeURL)`.
+    - **Pass the account's email as `loginHintEmail`** so claude.ai preselects the right account on re-auth (spike S9 confirmed the parameter is accepted). Pass `nil` for the add-account flow, where no account is known yet. Task 7's `begin` builds the URL, so the hint must be handed to it — do not rebuild the URL here.
+    - **Do NOT call `waitForCallback`.** `begin` already armed it before returning; that ordering is what stops an arriving callback from being 404'd and the single-use code burned. Use the returned task.
+  - Loopback: `await result.callback?.value`. nil → restart as paste: `try await deps.beginLogin(accountID, true, emailFor(accountID))`, set `.awaitingPaste`, open the new URL. Non-nil → `finishLogin(code:)`.
+    - Note a deliberate contract quirk from Task 6: a successful return can legitimately arrive *after* the timeout when a code was accepted right at the boundary — the timeout bounds acceptance, not total call duration. Treat a non-nil late result as success, not as a timeout.
+  - `finishLogin(code:)`: `try deps.exchange(...)`. **`OAuthLoginError` has THREE cases — handle all three, or the third is dead at its only call site** (found in the Task 5 review): `.transient` → retry once (this now also covers transport failures: offline, timeout, DNS, and any unexpected status, since Task 5 fails open); `.exchangeRejected` (400/401/403) → `.failed("Login expired or was already used — try again.")`; `.malformedResponse` → `.failed("Got an unreadable response from the login server — try again.")` (realistically a captive portal or a Cloudflare challenge page returned with a 200). Then identity (required):
     - throws → `.failed("Logged in, but couldn't verify the account — Retry.")`, **keep** `pendingLogin` + the in-memory creds for a `retryIdentity()`.
     - mismatch vs `account.accountUUID` → `.failed("That browser is signed into \(identity.email) — expected \(label).")`, **drop** creds, clear pending.
     - match (or `accountUUID == nil` → backfill via `AccountIdentityResolver`, dedupe-merge): `do { try credentials.update(id:, credentials:) } catch { .failed("Logged in, but couldn't store it — keychain unreadable.") ; return }` — **no `try?`**. Then `runtimes[id]?.credentialsReplaced()`, clear `needsReAuth[id]`, clear pending, `.idle`, post a success notification.
   - `accountID == nil` path (Add account): after identity, dedupe against existing `accountUUID`; existing → refresh in place; else append a new `Account` and `attachRuntime`.
   - `submitPaste(_ raw:)`: guard `pendingLogin?.mode == .paste`; `OAuthPaste.parse` → guard state matches `pending.pkce.state` (else `.failed("That code doesn't match this login.")`) → `finishLogin(code:)`.
   - `cancelLogin()`: `server.stop()`, clear `pendingLogin`, reset the owning state to `.idle`.
+  - **Cancellation must have its own catch (found in the Task 5 re-review).** `exchange` deliberately rethrows the raw error (not an `OAuthLoginError`) when `Task.isCancelled`, so it matches none of the three `OAuthLoginError` branches. Catch `is CancellationError` / `URLError.cancelled` — or simply check `Task.isCancelled` — and return to `.idle` silently, showing NO error: the user cancelled on purpose. Without this branch a cancelled login surfaces an unhandled error, which is the same defect class the Task 5 Critical fixed.
 - [ ] **Step 4: Delete** `addCurrentAccount()` and `rereadFromClaudeCode(_:)`. Run `make test` — expect compile breaks at their call sites (fixed in Task 11) and the deleted-code test suite (fixed in Task 12); for now run `-only-testing:ClaudeUsageBarTests/AccountsViewModelLoginTests`. Expected: PASS.
 - [ ] **Step 5: Commit** — `feat: beginLogin flow with explicit error taxonomy; remove keychain capture`
 

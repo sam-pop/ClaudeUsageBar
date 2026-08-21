@@ -150,6 +150,21 @@ enum Mode { case loopback(port: UInt16), paste }
 - Wrong-account grants are dropped from the app (never persisted). **Revocation is not available for this client (S10):** a dropped or removed grant stays valid server-side until it ages out (~28 days). Accepted, documented limitation — the app minimizes exposure by requesting only `user:profile user:inference` (no api-key scope) and by keeping stored tokens in the existing keychain map.
 - Tokens persist only via the existing single-item keychain map store; save failures surface (§4 taxonomy), never `try?`.
 
+## 7a. Known limitation: 403 is ambiguous (accepted, with a revisit trigger)
+
+Raised by the Task 5 implementer and accepted by the lead rather than fixed now.
+
+**Precisely what Phase 0 observed** (an earlier draft of this section overstated this; corrected after the Task 5 re-review caught it):
+- **429**, not 403, was the User-Agent trap: the token endpoint returned `rate_limit_error` to UA-less requests and 200 to the identical request with a UA (S1).
+- **403 with a Cloudflare "Just a moment…" challenge page** was seen only when probing *revoke* routes that do not exist for this client (S10). It was never seen from the token endpoint's OAuth handling.
+- A **genuine OAuth 403 rejection was never observed at all.** Neither was a challenge-403 from the token endpoint.
+
+So the ambiguity is theoretical for the token endpoint, not measured: we know Cloudflare will 403-challenge *some* requests to these hosts, and we do not know that it ever does so for a legitimate exchange. The classifier treats all 403s as terminal `.exchangeRejected`, matching the existing `OAuthRefreshOutcome` set so the login and refresh paths agree.
+
+Accepted because: (a) with a proper User-Agent every real exchange returned 200; (b) even if a challenge-403 did occur, the user's next action — retry the login — is exactly what recovers; (c) status alone cannot distinguish the two.
+
+**Revisit trigger:** if a real login ever reports "Login expired or was already used" while the code is genuinely fresh. **The fix if so:** a 4xx whose `Content-Type` is not JSON is an infrastructure page rather than an OAuth error response — classify those `.transient`. This inspects only the header, never the body, so it costs nothing in secret hygiene.
+
 ## 8. Testing
 
 - **Pure units:** PKCE (RFC 7636 test vector), authorize-URL builder, `code#state` parser (trim/length-cap/malformed), state match incl. cross-login rejection, exchange decode incl. `refresh_token_expires_in`, expiry-countdown formatting.
