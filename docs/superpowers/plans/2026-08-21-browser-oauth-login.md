@@ -660,6 +660,33 @@ func serial() async { /* start one (fake begin returns loopback but never comple
 
 **Interfaces:**
 - Produces: `func credentialsReplaced() async` — resets the breaker, clears `needsReAuth`, triggers `refresh()`. Also: in `tryTokenRefresh`, carry forward `refreshTokenExpiresAt` when the refresh response omits it.
+- Also produces (folded in from the Task 1 review): `KeychainService.refreshCredentials(from data: Data, fallbackRefreshToken: String) throws -> CachedCredentials` — the pure decode+map lifted out of `performOAuthRefresh`, so the refresh path's JSON key mapping is unit-tested. **Why:** `performOAuthRefresh` currently maps `refresh_token_expires_in` inline with no test; a typo in that key would ship green and silently yield `nil` forever. Task 5 covers the *exchange* path's decode; nothing covered the *refresh* path's.
+- **Note:** Task 1's brief carried a contradiction — its Interfaces line claimed `performOAuthRefresh` "preserves the prior value" while its Step 3 deferred that here. This task is where preservation actually happens; `performOAuthRefresh` itself stays a pure exchange.
+
+- [ ] **Step 0: Extract + test the refresh decode** (folded in from the Task 1 review). Lift the `RefreshResponse` decode and mapping out of `KeychainService.performOAuthRefresh` into `static func refreshCredentials(from data: Data, fallbackRefreshToken: String) throws -> CachedCredentials`, and have `performOAuthRefresh` call it. Test it first, against the spike's real response shape:
+
+```swift
+@Suite("KeychainService.refreshCredentials")
+struct RefreshDecodeTests {
+    @Test("Maps the real refresh response, including refresh_token_expires_in")
+    func mapsRealShape() throws {
+        let body = #"{"access_token":"at","refresh_token":"rt","expires_in":28800,"refresh_token_expires_in":2383011,"token_type":"Bearer"}"#
+        let creds = try KeychainService.refreshCredentials(from: Data(body.utf8), fallbackRefreshToken: "old")
+        #expect(creds.accessToken == "at")
+        #expect(creds.refreshToken == "rt")
+        #expect(creds.refreshTokenExpiresAt != nil)
+        #expect(creds.expiresAt != nil)
+    }
+
+    @Test("Falls back to the prior refresh token when the response omits one")
+    func fallsBack() throws {
+        let body = #"{"access_token":"at","expires_in":10}"#
+        let creds = try KeychainService.refreshCredentials(from: Data(body.utf8), fallbackRefreshToken: "old")
+        #expect(creds.refreshToken == "old")
+        #expect(creds.refreshTokenExpiresAt == nil)   // caller carries the old value forward (Step 3)
+    }
+}
+```
 
 - [ ] **Step 1: Write the failing test** — after a tripped breaker, `credentialsReplaced()` clears `needsReAuth` and re-fetches.
 
