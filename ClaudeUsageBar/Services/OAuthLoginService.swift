@@ -89,9 +89,9 @@ struct OAuthLoginService {
 }
 
 extension OAuthLoginService {
-    /// Bounds how long the loopback listener waits for a callback to be *accepted*, not this
-    /// call's total duration — matches `LoopbackServer.waitForCallback`'s own contract: a
-    /// callback accepted right at this boundary is still delivered.
+    /// Bounds how long the loopback listener waits for a callback to be *accepted*, not how
+    /// long the wait itself may take — matches `LoopbackServer.waitForCallback`'s own contract:
+    /// a callback accepted right at this boundary is still delivered.
     static let loopbackTimeout: TimeInterval = 600
 
     /// Starts a browser OAuth login: generates fresh PKCE and decides loopback-vs-paste mode
@@ -117,11 +117,14 @@ extension OAuthLoginService {
     /// like any stray request, silently burning the single-use code. Rather than leave that
     /// sequencing to the caller, this method itself enqueues the wait — as a concurrent `Task`
     /// — before returning. That does NOT guarantee the wait has actually armed by the time this
-    /// method returns: the executor still has to pick the `Task` up and cross into the actor
-    /// before `engine.arm` runs. What it does remove entirely is the realistic failure mode — a
-    /// caller sequencing `openURL` and then `waitForCallback` fully serially — since that call
-    /// is no longer reachable from caller code at all. The residual scheduling window is
-    /// microseconds, raced against a browser launch plus a TLS handshake plus user interaction.
+    /// method returns: the executor still has to pick the `Task` up and cross into the actor,
+    /// and `engine.arm` then hops onto the engine's own queue before the phase actually flips to
+    /// `.awaiting`. What it does remove entirely is the realistic failure mode — a caller
+    /// sequencing `openURL` and then `waitForCallback` fully serially — since the wait is
+    /// already handed back as a `Task`, so the serial form is no longer the natural way to write
+    /// the caller. The method stays callable — hence the warning below. The residual scheduling
+    /// window is microseconds, raced against a browser launch plus a TLS handshake plus user
+    /// interaction.
     ///
     /// For loopback mode, the caller opens `authorizeURL` and then `await`s the returned
     /// `callback` for the resulting code. A delivered code stops the listener automatically
@@ -171,9 +174,10 @@ extension OAuthLoginService {
         let expectedState = pkce.state
         let callback = Task<String?, Never> {
             let code = await server.waitForCallback(expectedState: expectedState, timeout: Self.loopbackTimeout)
-            // Task 6 writes the success page before handing the code over, so stopping here
-            // cannot cut the browser off mid-load. Success only: a timeout must leave the
-            // listener up so LoopbackServer's own grace-period "expired" page keeps serving.
+            // The code is handed over only after the success-page send has been processed — or
+            // after the connection was already gone — so stopping here cannot cut the browser
+            // off mid-load. Success only: a timeout must leave the listener up so
+            // LoopbackServer's own grace-period "expired" page keeps serving.
             if code != nil { await server.stop() }
             return code
         }
