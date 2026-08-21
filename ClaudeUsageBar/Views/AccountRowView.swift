@@ -56,7 +56,7 @@ struct AccountRowView: View {
             } label: { Image(systemName: "pencil").font(.system(size: 10)) }
                 .buttonStyle(.borderless).help("Rename / set menu-bar code")
             Button(role: .destructive) {
-                viewModel.remove(account.id)
+                Task { await viewModel.remove(account.id) }
             } label: { Image(systemName: "trash").font(.system(size: 10)) }
                 .buttonStyle(.borderless).help("Remove this account")
         }

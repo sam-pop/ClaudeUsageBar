@@ -263,6 +263,14 @@ struct AccountsViewModelBrowserLoginTests {
         return message
     }
 
+    private func noticeMessage(_ state: AccountsViewModel.LoginState?, _ comment: Comment) -> String {
+        guard case .notice(let message)? = state else {
+            Issue.record("expected a .notice state, got \(String(describing: state)) — \(comment)")
+            return ""
+        }
+        return message
+    }
+
     // MARK: - Success
 
     @Test("Success: exchange → matching identity → stored, needsReAuth cleared, runtime refreshed")
@@ -343,6 +351,53 @@ struct AccountsViewModelBrowserLoginTests {
         #expect(vm.loginState[account.id] == .awaitingPaste)
         #expect(vm.pendingLogin?.mode == .paste)
         #expect(script.exchangeCount == 0)
+        // Ten minutes have passed with the popover shut: without a notification the app has
+        // silently opened a new page and started expecting a pasted code.
+        #expect(script.notifications.count == 1)
+        #expect(script.notifications.first?.content.body.contains("paste the code") == true)
+    }
+
+    @Test("A restart that fails to start reports the failure, not a request to paste a code")
+    func failedRestartDoesNotAskForAPaste() async {
+        let script = Script()
+        script.callbackCode = nil   // the loopback wait times out, so a paste restart follows
+
+        let account = Account(label: "Work", accountUUID: "acct-A")
+        let vm = makeVM(script, accounts: [account], store: InMemoryAccountCredentialStore())
+
+        // The restart itself can't start: there is no login left to paste into.
+        script.beginError = OAuthLoginError.transient
+        await vm.beginLogin(account.id)
+
+        #expect(vm.pendingLogin == nil)
+        #expect(script.notifications.count == 1)
+        #expect(script.notifications.first?.content.title.contains("didn't finish") == true)
+    }
+
+    @Test("Removing an account mid-login releases the slot — its Cancel button went with the row")
+    func removingAnAccountCancelsItsLogin() async {
+        let script = Script()
+        script.beginPaste = true   // parks in .awaitingPaste holding the one pending slot
+
+        let work = Account(label: "Work", accountUUID: "acct-A")
+        let vm = makeVM(script, accounts: [work], store: InMemoryAccountCredentialStore())
+
+        await vm.beginLogin(work.id)
+        #expect(vm.pendingLogin != nil)
+
+        await vm.remove(work.id)
+
+        #expect(vm.pendingLogin == nil)
+        #expect(vm.loginState[work.id] == nil)     // no orphaned entries for a gone account
+        #expect(vm.needsReAuth[work.id] == nil)
+
+        // The slot is really free: the next login starts instead of being refused with
+        // "Finish the login in progress first." while no login is on screen to finish.
+        script.identityResults = [.success(identity("acct-B", email: "b@example.com", name: "Bee"))]
+        await vm.beginLogin(nil)
+
+        #expect(script.beginCalls.count == 2)
+        #expect(vm.addLoginState == .awaitingPaste)
     }
 
     @Test("The paste-mode restart never restarts again, even if it is handed a listener")
@@ -687,6 +742,27 @@ struct AccountsViewModelBrowserLoginTests {
         #expect(vm.pendingLogin == nil)
     }
 
+    @Test("A later outcome replaces the earlier notification rather than stacking beside it")
+    func outcomeNotificationsShareOneIdentifier() async {
+        let script = Script()
+        script.callbackCode = "auth-code"
+        script.exchangeResults = [.failure(OAuthLoginError.exchangeRejected),
+                                  .success(Self.freshCredentials)]
+        script.identityResults = [.success(identity("acct-A", email: "a@example.com"))]
+
+        let account = Account(label: "Work", accountUUID: "acct-A")
+        let store = InMemoryAccountCredentialStore([account.id: Self.oldCredentials])
+        let vm = makeVM(script, accounts: [account], store: store)
+
+        await vm.beginLogin(account.id)   // fails
+        await vm.beginLogin(account.id)   // then succeeds
+
+        #expect(script.notifications.count == 2)
+        // One identifier per flow, so Notification Center replaces the first: "login didn't
+        // finish" must not sit next to the "logged in" that followed it.
+        #expect(Set(script.notifications.map(\.identifier)).count == 1)
+    }
+
     @Test("An identity failure notifies too: it parks the login where nothing else can be started")
     func identityFailureNotifies() async {
         let script = Script()
@@ -740,11 +816,11 @@ struct AccountsViewModelBrowserLoginTests {
 
         #expect(vm.accounts.count == 1)
         #expect(try store.loadAll()[account.id]?.accessToken == "fresh-token")
-        guard case .failed(let message) = vm.addLoginState else {
-            Issue.record("expected the dedupe notice, got \(vm.addLoginState)")
-            return
-        }
-        #expect(message.contains("already tracked"))
+        // A notice, not a failure: the credentials landed. Rendering this as an error styles a
+        // success in red and contradicts the success notification this same flow posts.
+        #expect(noticeMessage(vm.addLoginState, "add-account dedupe").contains("already tracked"))
+        #expect(vm.loginAffordance(for: nil).actions == [.dismiss])
+        #expect(!vm.loginAffordance(for: nil).actions.contains(.tryAgain))
         #expect(vm.pendingLogin == nil)
         #expect(script.beginCalls.first?.hint == nil)   // no hint for an unknown account
     }
@@ -795,8 +871,9 @@ struct AccountsViewModelBrowserLoginTests {
         // …and the identity is NOT backfilled onto the migrated slot: two accounts claiming
         // one identity is exactly what the dedupe exists to prevent.
         #expect(vm.accounts.first(where: { $0.id == migrated.id })?.accountUUID == nil)
-        let message = failureMessage(vm.loginState[migrated.id], "duplicate merge")
+        let message = noticeMessage(vm.loginState[migrated.id], "duplicate merge")
         #expect(message.contains("already tracked"))
+        #expect(vm.loginAffordance(for: migrated.id).actions == [.dismiss])
     }
 
     @Test("An identity-less account with no duplicate is backfilled and stored")
@@ -886,7 +963,7 @@ struct AccountsViewModelBrowserLoginTests {
         let account = Account(label: "Work", accountUUID: "acct-A", email: "a@example.com")
         let vm = makeVM(script, accounts: [account], store: InMemoryAccountCredentialStore())
 
-        await vm.beginLogin(nil)   // an already-tracked identity: the notice rides on `.failed`
+        await vm.beginLogin(nil)   // an already-tracked identity produces the dedupe notice
 
         #expect(vm.loginAffordance(for: nil).message?.contains("already tracked") == true)
 

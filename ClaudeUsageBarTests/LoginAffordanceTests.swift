@@ -46,9 +46,9 @@ struct LoginAffordanceTests {
         #expect(affordance.message == nil)
     }
 
-    @Test("Awaiting a paste offers the field and a way out of it")
+    @Test("Awaiting a paste offers the field, a way out, and the link to the page holding the code")
     func pasteOffersFieldAndCancel() {
-        #expect(resolve(.awaitingPaste).actions == [.submitPaste, .cancel])
+        #expect(resolve(.awaitingPaste).actions == [.submitPaste, .cancel, .copyLink])
     }
 
     @Test("A rejected paste keeps the field, because that login is still willing to accept one")
@@ -57,8 +57,18 @@ struct LoginAffordanceTests {
                                  needsReAuth: true, hasLivePasteLogin: true)
         // Rendering this as a terminal failure would drop the field and offer a fresh login
         // that the one-login-at-a-time rule refuses without a word — a dead end.
-        #expect(affordance.actions == [.submitPaste, .cancel])
+        #expect(affordance.actions == [.submitPaste, .cancel, .copyLink])
         #expect(affordance.message == "That doesn't look like a login code — copy the whole line.")
+    }
+
+    @Test("A notice is not an error: no retry, nothing to undo, just something to read")
+    func noticeIsNeverAnError() {
+        let affordance = resolve(.notice("“Work” is already tracked — its login was refreshed."))
+        #expect(affordance == .notice(message: "“Work” is already tracked — its login was refreshed."))
+        #expect(affordance.actions == [.dismiss])
+        // The login it describes succeeded: a retry would launch a browser to fix nothing.
+        #expect(!affordance.actions.contains(.tryAgain))
+        #expect(!affordance.actions.contains(.logIn))
     }
 
     @Test("An identity failure outranks the live-paste-login rule")

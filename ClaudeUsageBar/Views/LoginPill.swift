@@ -63,6 +63,9 @@ struct LoginPill: View {
             }
         case .identityFailed(let message), .failed(let message):
             line(message, icon: "exclamationmark.triangle.fill", tint: .red)
+        case .notice(let message):
+            // Neutral on purpose: the login this describes worked.
+            line(message, icon: "info.circle", tint: .secondary)
         }
     }
 
@@ -223,6 +226,7 @@ struct LoginPill: View {
         switch affordance {
         case .waitingForBrowser: return .blue
         case .awaitingPaste(let rejection): return rejection == nil ? .blue : .red
+        case .notice: return .secondary
         case .none, .start, .identityFailed, .failed: return .red
         }
     }

@@ -23,6 +23,8 @@ enum LoginAffordance: Equatable {
     case identityFailed(message: String)
     /// The login ended without credentials; the only way forward is a new one.
     case failed(message: String)
+    /// The login landed, with something to say about where — no error, nothing to retry.
+    case notice(message: String)
 
     /// - Parameters:
     ///   - state: this flow's entry in `loginState`, or `addLoginState` for the add flow.
@@ -43,6 +45,8 @@ enum LoginAffordance: Equatable {
             return .waitingForBrowser
         case .awaitingPaste:
             return .awaitingPaste(message: nil)
+        case .notice(let message):
+            return .notice(message: message)
         case .failed(let message):
             if canRetryIdentity { return .identityFailed(message: message) }
             // A rejected paste — unreadable, or a state that belongs to another login — keeps
@@ -58,7 +62,7 @@ enum LoginAffordance: Equatable {
     /// The text shown alongside the controls, when the state carries one.
     var message: String? {
         switch self {
-        case .identityFailed(let message), .failed(let message): return message
+        case .identityFailed(let message), .failed(let message), .notice(let message): return message
         case .awaitingPaste(let message): return message
         case .none, .start, .waitingForBrowser: return nil
         }
@@ -74,7 +78,9 @@ enum LoginAffordance: Equatable {
         case .waitingForBrowser:
             return [.cancel, .copyLink, .usePasteCode]
         case .awaitingPaste:
-            return [.submitPaste, .cancel]
+            // Copy link belongs here too: the page carrying the code is the page this URL
+            // opens, so a user who closed that tab can reopen it instead of starting over.
+            return [.submitPaste, .cancel, .copyLink]
         case .identityFailed:
             // Both, always. Retry alone parks the pending login forever when the identity
             // endpoint stays unreachable — and because that login holds the one pending slot,
@@ -86,6 +92,10 @@ enum LoginAffordance: Equatable {
             // because nothing else clears the message — a flow's state is not written again
             // until it logs in, so it would otherwise sit in the popover indefinitely.
             return [.tryAgain, .dismiss]
+        case .notice:
+            // No retry: the login it describes succeeded. Offering one would launch a whole
+            // browser login to "fix" something that isn't broken.
+            return [.dismiss]
         }
     }
 }
