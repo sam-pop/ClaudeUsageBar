@@ -25,9 +25,31 @@
 
 **Non-goals:** revoking previously captured tokens (age out naturally); org selection; API-key auth; programmatically reopening the MenuBarExtra window (no macOS 13 API); menu-bar-icon login indicators.
 
-## 3. Phase-0 spike (hard gate — no app code before this passes)
+## 3. Phase-0 spike — RUN 2026-08-21, PASSED (gate cleared)
 
-Scripted (curl/python), against live endpoints, findings appended to this spec. Authorize-endpoint details below are **inference** from Claude Code's binary strings until the spike proves them.
+Scripts in `spikes/`. Ran against live endpoints with real logins for poplovitch.samuel@gmail.com. **Findings (these supersede the inferences below and drive §4–§9):**
+
+- **S1 loopback flow works.** `GET https://claude.ai/oauth/authorize` with `response_type=code`, `redirect_uri=http://localhost:<port>/callback`, `code_challenge` (S256), `state`, `scope` → browser redirects to the loopback listener with `code` + `state` only (no extra params). Exchange `POST https://console.anthropic.com/v1/oauth/token`, JSON body `{grant_type:"authorization_code", code, state, client_id, redirect_uri, code_verifier}` → **HTTP 200**. Response keys: `access_token, refresh_token, expires_in, refresh_token_expires_in, scope, token_type, token_uuid, account{uuid,email_address}, organization{uuid,name}`.
+- **CRITICAL — requests MUST send a `User-Agent`.** With curl's default UA the token endpoint returns **HTTP 429 rate_limit_error** (this cost two failed spike runs); with `User-Agent: ClaudeUsageBar/…` it returns 200. The app already sends `AppInfo.userAgent` on its other calls — the login/exchange requests must too. Cloudflare fronts these hosts and challenges UA-less POSTs.
+- **S4 scope minimized.** Requesting `org:create_api_key user:profile user:inference` **granted back only `user:inference user:profile`** — the API drops `org:create_api_key` for this client. Design requests exactly `user:profile user:inference`. No API-key-minting privilege is ever attached to a stored token.
+- **S5 both endpoints accept the new token:** `GET /oauth/usage` → 200, `GET /api/oauth/profile` → 200.
+- **S6 grants COEXIST — no eviction.** A second login for the same account left grant #1's refresh token fully usable (refresh → 200). **A second login does NOT kill the first.** Revoke-then-replace is therefore NOT required; repeated logins are safe and never a self-inflicted DoS.
+- **S7 refresh renews the window (rolling expiry).** `refresh_token_expires_in` stays ~2.38M s (~27.6 days) across a refresh — each successful refresh re-arms the ~28-day clock. So an actively-polling app stays logged in indefinitely; the ~28-day death only happens after ~4 weeks with **no** successful refresh (e.g. app not running, or token already dead). Matches the real Jul-20→Aug-17 deaths.
+- **S9 `login_hint=<email>` accepted** on authorize (used to preselect the account on re-auth).
+- **S2 paste-mode flow works.** Authorize with `redirect_uri=https://console.anthropic.com/oauth/code/callback` → callback page shows `code#state` → exchange with that redirect_uri → **HTTP 200**. State round-trips intact.
+- **S3 loopback ports are port-agnostic.** Registered redirect URIs are `http://localhost/callback` and `http://127.0.0.1/callback` (**no port** — per client metadata at `https://claude.ai/oauth/claude-code-client-metadata`), and two distinct ephemeral ports (50832, 50958) both succeeded → any loopback port is accepted (RFC 8252 §7.3). Both `localhost` and `127.0.0.1` are registered.
+- **S8 hosts.** Authorize `claude.ai`, token `console.anthropic.com/v1/oauth/token` (proven 200). CLI v2.1.238 also carries `platform.claude.com` equivalents (reachable — token host returned a normal `invalid_grant` to a probe) → pin the proven hosts, keep `platform.claude.com` as documented fallback.
+- **S10 REVOCATION NOT SUPPORTED.** Client metadata advertises only `grant_types: [authorization_code, refresh_token]`; no revoke endpoint exists in the CLI binary; every guessed revoke path returned a Cloudflare 403 and the token stayed live. **⇒ "revoke on account removal" is removed from the design (§7/§9).** Removed accounts and wrong-account grants stay valid server-side until they age out (~28 days); this is an accepted, documented limitation.
+- **S11 (T+72h durability) NOT RUN — superseded.** S7 already proved rolling-window renewal, and the ~28-day mechanism now matches observed production deaths; leaving a live refresh token in a plaintext file for 3 days to re-confirm was not worth the exposure. Spike token files were deleted immediately after each run.
+- `token_endpoint_auth_method: none` (public client) confirms the PKCE-without-secret model already used by the app's refresh path.
+
+**Gate verdict: PASSED.** Loopback + paste flows, minimal scope, coexisting grants, rolling renewal, and `login_hint` are all confirmed live. Proceed to implementation.
+
+---
+
+### Original spike plan (for reference; superseded by the findings above)
+
+Authorize-endpoint details below were **inference** from Claude Code's binary strings until the spike proved them.
 
 | # | Experiment | Decides |
 |---|-----------|---------|
@@ -66,7 +88,7 @@ enum Mode { case loopback(port: UInt16), paste }
 ```
 
 - `begin(accountID:preferredMode:) -> (PendingLogin, authorizeURL: URL)` — pure given injected RNG; caller opens the URL via injected `openURL`.
-- `exchange(code:pending:) async throws -> TokenGrant` — POST to the token endpoint with the S1-recorded body (`grant_type=authorization_code`, `code`, `client_id`, `code_verifier`, `redirect_uri`, `state` — final list from S1). Returns access token, refresh token, `expires_in`, `refresh_token_expires_in`.
+- `exchange(code:pending:) async throws -> TokenGrant` — POST to the token endpoint with body `{grant_type:"authorization_code", code, state, client_id, redirect_uri, code_verifier}` (S1-confirmed). **Every request in the flow — authorize open is a browser URL, but the exchange POST, the identity fetch, and any refresh — MUST send `User-Agent: AppInfo.userAgent`; a missing UA gets a Cloudflare 429 (S1).** Returns access token, refresh token, `expires_in`, `refresh_token_expires_in`.
 - Mode is chosen **before** the browser opens: try to bind the listener; bind failure → `.paste` mode. A timeout **restarts** as a fresh `.paste` login (new state+verifier, prior pending invalidated). There is no mid-flight fallback — `redirect_uri` is fixed at authorize time.
 
 ### `LoopbackServer`
@@ -99,17 +121,18 @@ enum Mode { case loopback(port: UInt16), paste }
 
 - Shared `LoginPill` component driven by `needsReAuth[id]` + `loginState[id]`, rendered in **both** `UsageMatrixView.freshness` and `AccountRowView` — and in `AccountRowView` it renders regardless of snapshot presence (fixes §1.4). Label: "Log in again" (opens browser immediately) → "Waiting for browser… · Cancel · Copy link · Use a code instead" → paste field (mode `.paste`) → inline failure text in the owning column.
 - "Add current account" → "Add account…", same flow with `accountID == nil`; dedupe: an already-tracked identity refreshes that account's credentials in place (existing behavior, kept).
-- Expiry surfacing: freshness line shows "Login expires in *N* d" once `refreshTokenExpiresAt − now < 7 d`; pre-expiry notification at 3 d and 1 d (cadence copy adjusted by S7).
+- Expiry surfacing: because each successful refresh re-arms the ~28-day clock (S7), a running app rarely approaches expiry; the warning targets the "app was off for weeks / token already dead" case. Freshness line shows "Login expires in *N* d" once `refreshTokenExpiresAt − now < 7 d`; pre-expiry notification at 3 d and 1 d.
 
 ### Data model
 
 `CachedCredentials` gains `refreshTokenExpiresAt: Date?` (additive optional — existing keychain payloads decode unchanged). Populated from exchange and refresh responses; `performOAuthRefresh` keeps the prior value when the response omits it.
 
-## 5. OAuth endpoints (pinned after S1/S8)
+## 5. OAuth endpoints (pinned from the 2026-08-21 spike)
 
-- Authorize: `https://claude.ai/oauth/authorize` *(or S8 host)* — `client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e`, `response_type=code`, `code_challenge` (S256), `state`, `redirect_uri`, scopes per S4, `login_hint` per S9.
-- Token: `https://console.anthropic.com/v1/oauth/token` *(proven today; re-pinned per S8)* — exchange body verbatim from S1.
-- Paste-mode redirect: the manual-callback URL recorded in S2.
+- Authorize: `https://claude.ai/oauth/authorize` — `client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e`, `response_type=code`, `code_challenge` (S256), `code_challenge_method=S256`, `state`, `redirect_uri`, `scope=user:profile user:inference`, `login_hint=<email>` on re-auth. Fallback host `https://platform.claude.com/oauth/authorize`.
+- Token: `https://console.anthropic.com/v1/oauth/token` — body `{grant_type:"authorization_code", code, state, client_id, redirect_uri, code_verifier}`; `User-Agent` header required. Fallback host `https://platform.claude.com/v1/oauth/token`.
+- Loopback redirect: `http://localhost:<ephemeral port>/callback` (any port; `127.0.0.1` literal also registered).
+- Paste-mode redirect: `https://console.anthropic.com/oauth/code/callback` (callback page renders `code#state`).
 
 ## 6. Deletions and edits (complete inventory, audit-verified)
 
@@ -124,7 +147,7 @@ enum Mode { case loopback(port: UInt16), paste }
 - Pending login is single-use: cleared on success, cancel, timeout, and supersession; late loopback hits and stale pastes are rejected by state comparison.
 - Listener: loopback bind only; validates method+path+state before completing; static responses; no request material ever reflected.
 - Never logged/rendered: tokens, codes, verifiers, the authorize URL (contains `login_hint` email), or raw HTTP response bodies. `KeychainServiceError.refreshFailed(status:body:)` must never gain a `LocalizedError` conformance that surfaces `body` (today `state = .error(...)` renders error text in the popover).
-- Wrong-account grants are dropped, never persisted. Account **removal** revokes that account's refresh token (best-effort, S10) — otherwise every removal leaks a live grant.
+- Wrong-account grants are dropped from the app (never persisted). **Revocation is not available for this client (S10):** a dropped or removed grant stays valid server-side until it ages out (~28 days). Accepted, documented limitation — the app minimizes exposure by requesting only `user:profile user:inference` (no api-key scope) and by keeping stored tokens in the existing keychain map.
 - Tokens persist only via the existing single-item keychain map store; save failures surface (§4 taxonomy), never `try?`.
 
 ## 8. Testing
