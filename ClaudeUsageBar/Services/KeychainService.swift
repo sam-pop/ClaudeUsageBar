@@ -116,6 +116,17 @@ enum KeychainService {
             throw KeychainServiceError.refreshFailed(status: status, body: snippet)
         }
 
+        return try refreshCredentials(from: data, fallbackRefreshToken: refreshToken)
+    }
+
+    /// Pure decode of a 2xx OAuth refresh-token response into `CachedCredentials`. Kept
+    /// separate from the networking wrapper above so this mapping is unit-testable without
+    /// a live HTTP round trip. `fallbackRefreshToken` is used when the response omits
+    /// `refresh_token`. `now` is injectable for deterministic tests; defaults to `Date()`
+    /// so the one production call site above doesn't need to pass it.
+    static func refreshCredentials(
+        from data: Data, fallbackRefreshToken: String, now: Date = Date()
+    ) throws -> CachedCredentials {
         struct RefreshResponse: Decodable {
             let access_token: String
             let refresh_token: String?
@@ -126,9 +137,9 @@ enum KeychainService {
 
         return CachedCredentials(
             accessToken: decoded.access_token,
-            refreshToken: decoded.refresh_token ?? refreshToken,
-            expiresAt: decoded.expires_in.map { Date().addingTimeInterval(TimeInterval($0)) },
-            refreshTokenExpiresAt: decoded.refresh_token_expires_in.map { Date().addingTimeInterval(TimeInterval($0)) }
+            refreshToken: decoded.refresh_token ?? fallbackRefreshToken,
+            expiresAt: decoded.expires_in.map { now.addingTimeInterval(TimeInterval($0)) },
+            refreshTokenExpiresAt: decoded.refresh_token_expires_in.map { now.addingTimeInterval(TimeInterval($0)) }
         )
     }
 
