@@ -76,3 +76,14 @@ extension PendingLogin {
         return comps.url!
     }
 }
+
+enum OAuthPaste {
+    static func parse(_ raw: String) -> (code: String, state: String)? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count <= 8192, let hash = trimmed.firstIndex(of: "#") else { return nil }
+        let code = String(trimmed[..<hash])
+        let state = String(trimmed[trimmed.index(after: hash)...])
+        guard !code.isEmpty, !state.isEmpty else { return nil }
+        return (code, state)
+    }
+}
