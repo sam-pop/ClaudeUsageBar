@@ -118,6 +118,74 @@ struct LoopbackServerTests {
         await server.stop()
     }
 
+    /// The dangerous interleaving: a valid callback accepted at almost exactly the instant
+    /// the timeout fires. However it lands, the two sides must agree — a browser told
+    /// "Logged in" means the caller MUST get the code, and the expired page means the caller
+    /// MUST see `nil`. Dropping an accepted code is unrecoverable (it is single-use) and does
+    /// not reproduce on demand, so the arrival instant is swept across the deadline: the
+    /// request sits complete-but-for-its-terminator in the server's buffer, and the final two
+    /// bytes decide which side of the deadline it lands on.
+    @Test("A callback landing on the timeout instant is never silently dropped")
+    func callbackAtTheTimeoutInstant() async throws {
+        let timeout: TimeInterval = 0.03
+        for offsetMicroseconds in stride(from: -2500, through: 600, by: 100) {
+            let server = LoopbackServer(gracePeriod: 1)
+            let port = try await server.start()
+            let client = try PortHog.connect(to: port)
+            defer { client.close() }
+
+            let armed = DispatchTime.now()
+            async let captured = server.waitForCallback(expectedState: "st8", timeout: timeout)
+            try client.write("GET /callback?code=race&state=st8 HTTP/1.1\r\nHost: localhost\r\n")
+            let deadline = armed + timeout + Double(offsetMicroseconds) / 1_000_000
+            try await Task.sleep(nanoseconds: deadline.nanosecondsFromNow)
+            try client.write("\r\n")
+
+            let reply = try client.readAll(timeout: 5)
+            let code = await captured
+            if reply.contains("Logged in") {
+                #expect(code == "race", "the browser was told the login succeeded but the code was dropped")
+            } else {
+                #expect(code == nil, "the caller got a code the browser was never told about")
+            }
+            await server.stop()
+        }
+    }
+
+    @Test("A wait after a timeout returns nil at once instead of timing out again")
+    func waitAfterTimeoutReturnsImmediately() async throws {
+        let server = LoopbackServer(gracePeriod: 0.2)
+        _ = try await server.start()
+        #expect(await server.waitForCallback(expectedState: "st8", timeout: 0.1) == nil)
+        // A 30 s timeout that returns instantly can only be the spent-login guard.
+        let elapsed = await ContinuousClock().measure {
+            _ = await server.waitForCallback(expectedState: "st8", timeout: 30)
+        }
+        #expect(elapsed < .seconds(1))
+        await server.stop()
+    }
+
+    @Test("start() after stop() fails instead of handing back a dead port")
+    func startAfterStop() async throws {
+        let server = LoopbackServer()
+        let port = try await server.start()
+        await server.stop()
+        await #expect(throws: LoopbackServer.StartError.self) {
+            _ = try await server.start()
+        }
+        #expect(port != 0)
+    }
+
+    @Test("Percent-encoded query values are decoded before the state check")
+    func percentEncodedValues() async throws {
+        let server = LoopbackServer()
+        let port = try await server.start()
+        async let captured = server.waitForCallback(expectedState: "st 8", timeout: 5)
+        #expect(try await get(port: port, path: "/callback?code=a%2Fb%20c&state=st%208").status == 200)
+        #expect(await captured == "a/b c")
+        await server.stop()
+    }
+
     @Test("stop() while waiting resumes the waiter exactly once")
     func stopWhileWaiting() async throws {
         let server = LoopbackServer()
@@ -178,6 +246,17 @@ struct LoopbackServerTests {
             try await Task.sleep(nanoseconds: 20_000_000)   // force separate TCP segments
         }
         return try client.readAll(timeout: 5)
+    }
+}
+
+private extension DispatchTime {
+    /// Nanoseconds still to run, or 0 if the instant has already passed. (Dispatch's own
+    /// `DispatchTime + Double` does the arithmetic, and handles the sweep's negative
+    /// offsets.)
+    var nanosecondsFromNow: UInt64 {
+        uptimeNanoseconds > DispatchTime.now().uptimeNanoseconds
+            ? uptimeNanoseconds - DispatchTime.now().uptimeNanoseconds
+            : 0
     }
 }
 

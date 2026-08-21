@@ -15,8 +15,10 @@ import Network
 ///
 /// Lifecycle: `start()` → `waitForCallback(expectedState:timeout:)` → `stop()`. Shutdown is
 /// the caller's job: the server does not tear itself down on success, so the browser tab
-/// finishes loading the success page. `stop()` is idempotent, releases the port before it
-/// returns, and is safe to call while a wait is in flight (the waiter is resumed with `nil`).
+/// finishes loading the success page. `stop()` is idempotent, requests cancellation before
+/// it returns (the port has been immediately re-bindable in practice — see the
+/// `Ports are released between logins` test), and is safe to call while a wait is in flight
+/// (the waiter is then resumed with `nil`).
 ///
 /// Start the wait BEFORE opening the browser: until `waitForCallback` arms the listener, a
 /// callback would be answered `404` like any other stray request.
@@ -37,7 +39,9 @@ actor LoopbackServer {
     private var timeoutTask: Task<Void, Never>?
     private var graceTask: Task<Void, Never>?
     private var isStopped = false
-    private var hasDelivered = false
+    /// Set once this instance's single login has been settled — delivered or expired. A
+    /// spent server can never be re-armed, so a later wait returns `nil` at once.
+    private var isSpent = false
 
     /// - Parameters:
     ///   - gracePeriod: how long the "login expired" page keeps being served after a
@@ -54,11 +58,11 @@ actor LoopbackServer {
 
     /// Binds the loopback port and returns the OS-assigned port number.
     /// - Throws: `StartError.bindFailed` if the listener cannot bind or does not become
-    ///   ready within `bindTimeout`. Task 7's paste-mode fallback is driven by this error,
-    ///   so a bind failure is a handled condition, never a crash.
+    ///   ready within `bindTimeout`. The login flow's paste-mode fallback is driven by this
+    ///   error, so a bind failure is a handled condition, never a crash.
     func start() throws -> UInt16 {
-        if let port { return port }
         guard !isStopped else { throw StartError.bindFailed }
+        if let port { return port }
         // The engine blocks until the listener reports ready or failed. The signal comes
         // from the engine's own dispatch queue — never from this actor — so the wait cannot
         // deadlock on itself, and it is capped by `bindTimeout`.
@@ -70,12 +74,13 @@ actor LoopbackServer {
     /// Waits for `GET /callback?code=…&state=…` with `state == expectedState` and returns
     /// the code, or `nil` on timeout, on `stop()`, or if the server was never started.
     ///
-    /// One login per instance: a second call — concurrent, or after a code was already
-    /// delivered — returns `nil` immediately rather than displacing the first waiter or
-    /// re-arming a spent listener. The continuation is resumed exactly once: by delivery,
-    /// timeout, or `stop()`, whichever reaches the actor first.
+    /// One login per instance: a second call — concurrent, or after this login was already
+    /// settled by delivery or timeout — returns `nil` immediately rather than displacing the
+    /// first waiter or waiting out a full timeout against a listener that can no longer be
+    /// armed. The continuation is resumed exactly once: by delivery, timeout, or `stop()`,
+    /// whichever reaches the actor first.
     func waitForCallback(expectedState: String, timeout: TimeInterval) async -> String? {
-        guard port != nil, !isStopped, !hasDelivered, waiter == nil else { return nil }
+        guard port != nil, !isStopped, !isSpent, waiter == nil else { return nil }
         return await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
             waiter = continuation
             engine.arm(expectedState: expectedState) { [weak self] code in
@@ -100,16 +105,24 @@ actor LoopbackServer {
     }
 
     private func deliver(_ code: String) {
-        hasDelivered = true
+        isSpent = true
         finish(with: code)
     }
 
     /// Timeout reached: the engine stops completing logins and switches to the static
     /// "expired" page for `gracePeriod`, then the server shuts down.
     private func expire() {
-        // Nothing to expire if the code already arrived (or `stop()` won the race).
+        // No waiter left means delivery or `stop()` already resumed it.
         guard waiter != nil else { return }
-        engine.expire()
+        // A live waiter does NOT mean no code is in flight: between the engine accepting a
+        // callback and its `deliver` hop landing here, the waiter is still set. Only the
+        // engine can settle that, so ask it synchronously — and if it says a code was
+        // already accepted, do nothing at all. That delivery is guaranteed to arrive
+        // (`respond` calls its completion even when the connection has gone), and resuming
+        // `nil` here would silently drop a single-use code while the browser reads
+        // "Logged in".
+        guard engine.expire() else { return }
+        isSpent = true
         finish(with: nil)
         graceTask = Task { [weak self, gracePeriod] in
             try? await Task.sleep(nanoseconds: UInt64(max(0, gracePeriod) * 1_000_000_000))
@@ -151,8 +164,10 @@ private final class LoopbackEngine: @unchecked Sendable {
     /// Header bytes accepted per connection before the request is abandoned. The real
     /// callback is a single short GET; anything larger is noise or an attack.
     private static let maxRequestBytes = 16 * 1024
-    /// Concurrent connections held open. Browser preconnects add a handful; the cap stops
-    /// a local port scanner from parking unbounded buffers here.
+    /// Concurrent connections held open. Browser preconnects add a handful. This bounds the
+    /// buffer space stray connections can occupy; it is not a defence against a local process
+    /// that deliberately fills every slot (out of scope — a same-user attacker has far better
+    /// levers than this listener).
     private static let maxConnections = 64
 
     private let queue = DispatchQueue(label: "com.sam.ClaudeUsageBar.loopback")
@@ -173,9 +188,10 @@ private final class LoopbackEngine: @unchecked Sendable {
         let endpointPort = requestedPort == 0 ? NWEndpoint.Port.any : NWEndpoint.Port(rawValue: requestedPort)
         guard let endpointPort else { throw LoopbackServer.StartError.bindFailed }
         let parameters = NWParameters.tcp
-        // Loopback only: `requiredLocalEndpoint` pins the bind to 127.0.0.1, so the
-        // callback listener is never reachable from the local network. Port 0 means
-        // OS-assigned. Endpoint reuse stays off so a taken port fails instead of sharing.
+        // Loopback only: `requiredLocalEndpoint` pins the bind to 127.0.0.1 — verified with
+        // `lsof`, which shows `TCP 127.0.0.1:<port> (LISTEN)` and no wildcard socket. Port 0
+        // means OS-assigned. Endpoint reuse stays off; an already-taken port was then observed
+        // to fail with EADDRINUSE rather than bind alongside.
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: endpointPort)
         parameters.allowLocalEndpointReuse = false
 
@@ -220,18 +236,34 @@ private final class LoopbackEngine: @unchecked Sendable {
         }
     }
 
-    func expire() {
-        queue.async {
-            guard self.phase == .awaiting else { return }
-            self.phase = .expired
-            self.expectedState = ""
-            self.onCode = nil
+    /// Closes the window for completing this login.
+    ///
+    /// Synchronous, and its answer is what the caller's timeout decision hangs on: anything
+    /// already queued — including the final chunk of a callback that is mid-parse — runs
+    /// before this block, so the phase read here accounts for it.
+    ///
+    /// - Returns: `false` only when a callback has already been accepted and its code is on
+    ///   its way to the actor (`.satisfied`); the caller must NOT report a timeout then, or
+    ///   a single-use code would be dropped while the browser shows "Logged in". Every other
+    ///   phase returns `true`: nothing is in flight, so timing out is safe.
+    func expire() -> Bool {
+        queue.sync {
+            guard phase != .satisfied else { return false }
+            if phase == .awaiting {
+                phase = .expired
+                expectedState = ""
+                onCode = nil
+            }
+            return true
         }
     }
 
-    /// Synchronous on purpose: when this returns the port is released, so a caller may
-    /// immediately start another login. (`queue` only ever runs non-blocking work, and
-    /// nothing on it waits on the actor, so this cannot deadlock.)
+    /// Synchronous on purpose: when this returns, `cancel()` has been called on the listener
+    /// and on every open connection, so teardown is ordered ahead of whatever the caller does
+    /// next. `NWListener.cancel()` itself completes asynchronously, so this orders the request
+    /// rather than proving the socket is closed; in practice the port has been re-bindable
+    /// immediately. (`queue` only runs non-blocking work and nothing on it waits on the actor,
+    /// so this cannot deadlock.)
     func stop() {
         queue.sync {
             self.phase = .stopped
@@ -388,9 +420,10 @@ private final class LoopbackEngine: @unchecked Sendable {
         }
     }
 
-    /// `NWListener`/`NWConnection` deliver callbacks on the queue passed to `start(queue:)`,
-    /// which every state access below relies on. Checked in DEBUG (so the test suite would
-    /// catch a change) and compiled out of the shipped build.
+    /// Everything in this class assumes `Network` callbacks arrive on `queue` (the queue
+    /// handed to `start(queue:)`), which is what makes the unsynchronized state above safe.
+    /// The DEBUG check turns a violation into a test failure instead of a silent data race,
+    /// and is compiled out of the shipped build.
     private func assertOnQueue() {
         #if DEBUG
         dispatchPrecondition(condition: .onQueue(queue))
@@ -437,8 +470,9 @@ private struct LoopbackRequest {
         let requestLine = text.split(separator: "\r\n", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
         let fields = requestLine.split(separator: " ")
         isGET = fields.first == "GET"
-        // A request target is origin-form (`/callback?…`); parsing it against a dummy
-        // authority gives percent-decoded query values.
+        // Browsers send an origin-form target (`/callback?…`); parsing it against a dummy
+        // authority yields percent-decoded query values (covered by a test). Any other target
+        // shape simply fails the `/callback` path check below.
         let components = fields.count > 1 ? URLComponents(string: "http://127.0.0.1" + fields[1]) : nil
         path = components?.path ?? ""
         queryItems = components?.queryItems ?? []
