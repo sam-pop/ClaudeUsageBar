@@ -35,17 +35,21 @@ final class AccountRuntime {
         /// Fired for each newly-crossed usage threshold, so the coordinator can post a
         /// per-account notification. Optional so tests can omit it.
         var onThresholdCrossing: ((ThresholdTracker.Crossing) -> Void)?
-        /// Fired for each newly-crossed login-expiry day-threshold (3, 1), so the
-        /// coordinator can post a per-account pre-expiry notification. Optional so tests
-        /// can omit it.
-        var onLoginExpiryCrossing: ((Int) -> Void)?
+        /// Fired at most once per `refresh()` for the most urgent newly-crossed
+        /// login-expiry threshold, so the coordinator can post a per-account pre-expiry
+        /// notification. `threshold` is the day-bucket (3 or 1) that fired, for a stable
+        /// notification identifier; `daysRemaining` is the true remaining days, for the
+        /// notification body — they can differ (e.g. a threshold re-fires at a smaller
+        /// true remaining-days count than when it first fired). Optional so tests can
+        /// omit it.
+        var onLoginExpiryCrossing: ((_ threshold: Int, _ daysRemaining: Int) -> Void)?
 
         init(
             fetchUsage: @escaping (String) async throws -> UsageResponse,
             refreshToken: @escaping (CachedCredentials) async throws -> CachedCredentials,
             now: @escaping () -> Date,
             onThresholdCrossing: ((ThresholdTracker.Crossing) -> Void)? = nil,
-            onLoginExpiryCrossing: ((Int) -> Void)? = nil
+            onLoginExpiryCrossing: ((_ threshold: Int, _ daysRemaining: Int) -> Void)? = nil
         ) {
             self.fetchUsage = fetchUsage
             self.refreshToken = refreshToken
@@ -159,9 +163,10 @@ final class AccountRuntime {
             if let refreshed = await tryTokenRefresh(creds) { creds = refreshed }
         }
 
-        // Checked after the proactive-refresh attempt above (not before) so an account that
-        // just re-armed its ~28-day window is read at its new expiry, not the stale one that
-        // prompted the refresh.
+        // Checked after the proactive-refresh attempt above (not before) — that attempt is
+        // gated on the ACCESS token's own `expiresAt`, never this one, but when it succeeds
+        // it also re-arms the refresh token's ~28-day window, so reading `creds` here
+        // (already reassigned above on success) reflects the new expiry, not the old one.
         refreshTokenExpiresAt = creds.refreshTokenExpiresAt
         checkLoginExpiry(creds.refreshTokenExpiresAt)
 
@@ -235,10 +240,14 @@ final class AccountRuntime {
         for crossing in crossings { deps.onThresholdCrossing?(crossing) }
     }
 
-    /// Run on every `refresh()` regardless of whether the usage fetch itself succeeds — the
-    /// refresh token's expiry comes from the already-loaded credentials, not the network.
+    /// Run once credentials are available on every `refresh()`, regardless of whether the
+    /// usage fetch afterward succeeds — the refresh token's expiry comes from the
+    /// already-loaded credentials, not the network. Fires only the single most urgent
+    /// threshold crossed this call (the smallest day-count), so a jump past both 3d and 1d
+    /// at once posts one notification, not two.
     private func checkLoginExpiry(_ expiresAt: Date?) {
         let crossings = loginExpiryNotifier.check(refreshTokenExpiresAt: expiresAt, now: deps.now())
-        for days in crossings { deps.onLoginExpiryCrossing?(days) }
+        guard let threshold = crossings.min(), let expiresAt else { return }
+        deps.onLoginExpiryCrossing?(threshold, LoginExpiry.daysRemaining(until: expiresAt, now: deps.now()))
     }
 }

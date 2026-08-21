@@ -24,6 +24,7 @@ struct AccountsViewModelLoginTests {
         var resolve = 0
         var delete = 0
         var fetchUsage = 0
+        var notifications: [UNNotificationRequest] = []
     }
 
     private func ephemeralDefaults() -> UserDefaults {
@@ -122,6 +123,44 @@ struct AccountsViewModelLoginTests {
 
         #expect(calls.fetchUsage >= 1)
         #expect(vm.snapshots[account.id] != nil)
+    }
+
+    @Test("A relaunch at 2 days remaining posts exactly one login-expiry notification, body reading the true 2 days — not the 3-day threshold that fired it")
+    func loginExpiryNotificationBodyCarriesTrueDaysNotThreshold() async {
+        let calls = Calls()
+        let sharedDefaults = ephemeralDefaults()
+        let account = Account(label: "Work", accountUUID: "acct-A")
+        let accountsStore = AccountsStore(defaults: sharedDefaults)
+        accountsStore.save([account])
+
+        let credentialStore = InMemoryAccountCredentialStore([
+            account.id: CachedCredentials(
+                accessToken: "sk-ant-oat01-tok", refreshToken: "r", expiresAt: nil,
+                refreshTokenExpiresAt: Date(timeIntervalSince1970: 0).addingTimeInterval(2 * 86400))
+        ])
+
+        var deps = makeDeps(calls: calls, legacyCredentials: nil)
+        deps.addNotification = { calls.notifications.append($0) }
+        deps.fetchUsage = { _ in
+            UsageResponse(
+                fiveHour: UsagePeriod(utilization: 10, resetsAt: "2026-07-09T18:30:00Z"),
+                sevenDay: UsagePeriod(utilization: 10, resetsAt: "2026-07-16T00:00:00Z"))
+        }
+
+        let vm = AccountsViewModel(
+            accountsStore: accountsStore,
+            credentialStore: credentialStore,
+            defaults: sharedDefaults,
+            startTimer: false,
+            deps: deps)
+
+        await vm.refreshAll()
+
+        let loginExpiryNotices = calls.notifications.filter { $0.identifier.hasPrefix("login-expiry-") }
+        #expect(loginExpiryNotices.count == 1)
+        #expect(loginExpiryNotices.first?.identifier.hasSuffix("-3") == true)   // the 3-day threshold, for de-dup
+        #expect(loginExpiryNotices.first?.content.body.contains("2 days") == true)
+        #expect(loginExpiryNotices.first?.content.body.contains("3 days") == false)
     }
 }
 

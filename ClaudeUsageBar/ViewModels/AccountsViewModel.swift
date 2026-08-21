@@ -245,8 +245,8 @@ final class AccountsViewModel: ObservableObject {
             onThresholdCrossing: { [weak self] crossing in
                 self?.sendNotification(account: account, crossing: crossing)
             },
-            onLoginExpiryCrossing: { [weak self] daysRemaining in
-                self?.sendLoginExpiryNotification(account: account, daysRemaining: daysRemaining)
+            onLoginExpiryCrossing: { [weak self] threshold, daysRemaining in
+                self?.sendLoginExpiryNotification(account: account, threshold: threshold, daysRemaining: daysRemaining)
             }
         )
         let runtime = AccountRuntime(
@@ -838,8 +838,11 @@ final class AccountsViewModel: ObservableObject {
     }
 
     /// The pre-expiry warning for a refresh token about to die — the proactive nudge for the
-    /// "closed for weeks, or a token already dead" case this notifier exists for.
-    private nonisolated func sendLoginExpiryNotification(account: Account, daysRemaining: Int) {
+    /// "closed for weeks" case this notifier exists for. `threshold` (3 or 1) names the
+    /// notification for de-dup purposes; `daysRemaining` is the true count shown in the
+    /// body, which can differ from `threshold` (e.g. a threshold re-fires at a smaller true
+    /// remaining-days count than when it first fired).
+    private nonisolated func sendLoginExpiryNotification(account: Account, threshold: Int, daysRemaining: Int) {
         let content = UNMutableNotificationContent()
         content.title = "\(account.label): login expiring soon"
         content.body = daysRemaining <= 1
@@ -848,7 +851,7 @@ final class AccountsViewModel: ObservableObject {
         content.sound = .default
 
         let request = UNNotificationRequest(
-            identifier: "login-expiry-\(account.id.uuidString)-\(daysRemaining)",
+            identifier: "login-expiry-\(account.id.uuidString)-\(threshold)",
             content: content,
             trigger: nil
         )

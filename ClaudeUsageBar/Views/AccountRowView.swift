@@ -92,19 +92,32 @@ struct AccountRowView: View {
 
     // MARK: - Login expiry
 
+    /// Gated on the warning already existing (not just on `loginAffordance == .none`, which
+    /// is true for the vast majority of healthy accounts) so this contributes NOTHING to the
+    /// enclosing `VStack` — not even an empty `TimelineView` — when there's nothing to show.
+    /// A conditionally-mounted `TimelineView` still counts as a present child for spacing
+    /// purposes even when its own content renders empty, so gating only the inner content
+    /// left a permanent extra 8pt gap above the usage sections on every healthy account.
     @ViewBuilder
     private var loginExpiryWarning: some View {
-        if viewModel.loginAffordance(for: account.id) == .none {
+        if viewModel.loginAffordance(for: account.id) == .none,
+           LoginExpiry.warning(refreshTokenExpiresAt: accountView.refreshTokenExpiresAt, now: Date()) != nil {
             TimelineView(.periodic(from: .now, by: 30)) { context in
                 if let warning = LoginExpiry.warning(
                     refreshTokenExpiresAt: accountView.refreshTokenExpiresAt, now: context.date
                 ) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "clock.badge.exclamationmark")
-                            .font(.system(size: 9)).foregroundStyle(.orange)
-                        Text(warning).font(.caption2).foregroundStyle(.orange)
-                        Spacer(minLength: 0)
+                    Button {
+                        Task { await viewModel.beginLogin(account.id) }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "clock.badge.exclamationmark")
+                                .font(.system(size: 9)).foregroundStyle(.orange)
+                            Text(warning).font(.caption2).foregroundStyle(.orange)
+                            Spacer(minLength: 0)
+                        }
                     }
+                    .buttonStyle(.plain)
+                    .help("Opens claude.ai in your browser to sign in")
                 }
             }
         }

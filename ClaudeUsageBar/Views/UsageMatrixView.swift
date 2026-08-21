@@ -88,6 +88,10 @@ struct UsageMatrixView: View {
                 Text(email).font(.system(size: 9)).foregroundStyle(.tertiary).lineLimit(1)
             }
             freshness(column, now: now)
+            // A separate line, not a replacement for the one above: staleness and the
+            // per-account refresh button it carries stay visible for the entire 7-day
+            // warning window, same as `AccountRowView`'s layout.
+            loginExpiryLine(column, now: now)
         }
         .padding(.horizontal, 10).padding(.vertical, 9)
         .frame(width: Self.columnWidth, alignment: .leading)
@@ -100,12 +104,6 @@ struct UsageMatrixView: View {
         // how stale the numbers are matters less than the fact that they've stopped updating.
         if viewModel.loginAffordance(for: column.account.id) != .none {
             LoginPill(viewModel: viewModel, accountID: column.account.id, layout: .compact)
-        } else if let warning = LoginExpiry.warning(refreshTokenExpiresAt: column.refreshTokenExpiresAt, now: now) {
-            HStack(spacing: 3) {
-                Image(systemName: "clock.badge.exclamationmark").font(.system(size: 8))
-                Text(warning).font(.system(size: 9, weight: .medium))
-            }
-            .foregroundStyle(.orange)
         } else if let snapshot = column.snapshot {
             let stale = now.timeIntervalSince(snapshot.fetchedAt) > 300
             let ago = UsageFormatting.lastUpdatedText(since: snapshot.fetchedAt, now: now)
@@ -125,6 +123,23 @@ struct UsageMatrixView: View {
             Text("Couldn't load").font(.system(size: 9)).foregroundStyle(.orange)
         } else {
             Text("Loading…").font(.system(size: 9)).foregroundStyle(.tertiary)
+        }
+    }
+
+    /// Gated on `loginAffordance == .none` — same as `freshness` above's `LoginPill`
+    /// branch — so this never shows alongside the dead-login pill, which already speaks
+    /// for the account. A plain `if` with no wrapping container, so it contributes nothing
+    /// to the enclosing `VStack` when there's no warning to show.
+    @ViewBuilder
+    private func loginExpiryLine(_ column: AccountsViewModel.AccountView, now: Date) -> some View {
+        if viewModel.loginAffordance(for: column.account.id) == .none,
+           let warning = LoginExpiry.warning(refreshTokenExpiresAt: column.refreshTokenExpiresAt, now: now) {
+            Button {
+                Task { await viewModel.beginLogin(column.account.id) }
+            } label: {
+                pill(text: warning, systemImage: "clock.badge.exclamationmark", tint: .orange)
+            }
+            .buttonStyle(.plain).help("Opens claude.ai in your browser to sign in")
         }
     }
 

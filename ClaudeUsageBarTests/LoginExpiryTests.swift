@@ -18,14 +18,32 @@ struct LoginExpiryTests {
         #expect(LoginExpiry.warning(refreshTokenExpiresAt: now, now: now) == nil)
     }
 
-    @Test("A partial day still under 7 rounds up rather than reading nil at the boundary")
-    func partialDayRoundsUp() {
+    @Test("A partial day still under 7 rounds down — never overstating time left — with no display/silence collision at the boundary")
+    func partialDayRoundsDown() {
         let now = Date(timeIntervalSince1970: 0)
-        // 6.5 days out: under the 7-day window, so it must still warn, rounded to 7d rather
-        // than truncating to a 6d that reads as "further along" than an even 6d expiry.
-        #expect(LoginExpiry.warning(refreshTokenExpiresAt: now.addingTimeInterval(6.5*86400), now: now) == "Login expires in 7d")
-        // Exactly 7 days out is not yet "under 7 days".
+        // 6.5 days out: under the 7-day window, floored to 6d rather than rounded up to 7d —
+        // a deadline warning must not overstate how much time is left.
+        #expect(LoginExpiry.warning(refreshTokenExpiresAt: now.addingTimeInterval(6.5*86400), now: now) == "Login expires in 6d")
+        // Just under 7 days is the largest value this ever displays…
+        #expect(LoginExpiry.warning(refreshTokenExpiresAt: now.addingTimeInterval(6.99*86400), now: now) == "Login expires in 6d")
+        // …and exactly 7 days out is already silent, so display and silence never collide on
+        // the same number the way rounding up made "7d" mean both "6.5 days left" and nothing.
         #expect(LoginExpiry.warning(refreshTokenExpiresAt: now.addingTimeInterval(7*86400), now: now) == nil)
+    }
+
+    @Test("Under a day remaining still reads 1d, not 0d")
+    func underADayFloorsToOne() {
+        let now = Date(timeIntervalSince1970: 0)
+        #expect(LoginExpiry.warning(refreshTokenExpiresAt: now.addingTimeInterval(2*3600), now: now) == "Login expires in 1d")
+    }
+
+    @Test("daysRemaining floors and clamps at 1 — the true value a notification body uses, distinct from the threshold bucket")
+    func daysRemainingFloorsAndClamps() {
+        let now = Date(timeIntervalSince1970: 0)
+        #expect(LoginExpiry.daysRemaining(until: now.addingTimeInterval(2*86400), now: now) == 2)
+        #expect(LoginExpiry.daysRemaining(until: now.addingTimeInterval(2.9*86400), now: now) == 2)
+        #expect(LoginExpiry.daysRemaining(until: now.addingTimeInterval(30*60), now: now) == 1)   // 30 minutes out
+        #expect(LoginExpiry.daysRemaining(until: now.addingTimeInterval(28*86400), now: now) == 28)
     }
 }
 
@@ -73,7 +91,7 @@ struct LoginExpiryNotifierTests {
         #expect(notifier.check(refreshTokenExpiresAt: now.addingTimeInterval(-1), now: now) == [])
     }
 
-    @Test("A jump straight past both thresholds in one call fires both, oldest first")
+    @Test("A jump straight past both thresholds in one call fires both, most-urgent first")
     func bigJumpFiresBothThresholds() {
         var notifier = LoginExpiry.Notifier()
         #expect(notifier.check(refreshTokenExpiresAt: now.addingTimeInterval(0.5*86400), now: now) == [1, 3])
