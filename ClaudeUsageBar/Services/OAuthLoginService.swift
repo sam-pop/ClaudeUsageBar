@@ -89,9 +89,9 @@ struct OAuthLoginService {
 }
 
 extension OAuthLoginService {
-    /// How long the loopback listener waits for the browser's redirect before giving up and
-    /// resuming its wait with `nil`. A caller does not choose this later — see `begin` below
-    /// for why the wait is already running by the time it gets a value back.
+    /// Bounds how long the loopback listener waits for a callback to be *accepted*, not this
+    /// call's total duration — matches `LoopbackServer.waitForCallback`'s own contract: a
+    /// callback accepted right at this boundary is still delivered.
     static let loopbackTimeout: TimeInterval = 600
 
     /// Starts a browser OAuth login: generates fresh PKCE and decides loopback-vs-paste mode
@@ -108,29 +108,41 @@ extension OAuthLoginService {
     /// from `start()` (none is currently possible, per its own contract) propagates instead of
     /// being silently treated as a fallback.
     ///
+    /// `loginHintEmail` is forwarded to `pending.authorizeURL(loginHintEmail:)` when building
+    /// `authorizeURL` — supply it when re-authing a known account, to preselect it (the main
+    /// assist for the wrong-account recovery path); omit it for a fresh "Add account" login.
+    ///
     /// Ordering hazard this exists to prevent: `LoopbackServer.waitForCallback` must be armed
     /// before the browser can deliver its redirect, or the arriving callback is answered 404
     /// like any stray request, silently burning the single-use code. Rather than leave that
-    /// sequencing to the caller, this method itself starts the wait — as a concurrent `Task` —
-    /// before returning, so it is already armed by the time the caller has anything in hand to
-    /// open a browser with. For loopback mode, the caller's only remaining job is to open
-    /// `authorizeURL` and then `await` the returned `callback` for the resulting code (`nil` on
-    /// timeout or `server.stop()`). Do **not** call `server.waitForCallback` again yourself —
-    /// `LoopbackServer` allows exactly one waiter per login, so a second call returns `nil`
-    /// immediately, indistinguishable from an instant timeout.
+    /// sequencing to the caller, this method itself enqueues the wait — as a concurrent `Task`
+    /// — before returning. That does NOT guarantee the wait has actually armed by the time this
+    /// method returns: the executor still has to pick the `Task` up and cross into the actor
+    /// before `engine.arm` runs. What it does remove entirely is the realistic failure mode — a
+    /// caller sequencing `openURL` and then `waitForCallback` fully serially — since that call
+    /// is no longer reachable from caller code at all. The residual scheduling window is
+    /// microseconds, raced against a browser launch plus a TLS handshake plus user interaction.
     ///
-    /// `authorizeURL` is built with `loginHintEmail: nil`: this method only receives an account
-    /// id, not an email. A caller that knows the account's email and wants it preselected
-    /// should build its own URL via `pending.authorizeURL(loginHintEmail:)` instead of using
-    /// the one returned here.
+    /// For loopback mode, the caller opens `authorizeURL` and then `await`s the returned
+    /// `callback` for the resulting code. A delivered code stops the listener automatically
+    /// (see the implementation); a `nil` from timeout does not, so `LoopbackServer`'s own
+    /// grace-period "expired" page keeps serving. The caller still owns `server.stop()` for the
+    /// cancel/abandon paths (e.g. the user dismisses the login before either happens).
+    /// **`callback.cancel()` does nothing** — `waitForCallback` suspends in a plain
+    /// `CheckedContinuation`, not a cancellation handler, so cancelling this `Task` never
+    /// unblocks it; `server.stop()` is the only way to abort the wait. Do **not** call
+    /// `server.waitForCallback` again yourself either — `LoopbackServer` allows exactly one
+    /// waiter per login, so a second call returns `nil` immediately, indistinguishable from an
+    /// instant timeout.
     ///
-    /// Never log or print `authorizeURL` — it carries the PKCE code challenge (and, for a
-    /// caller-built URL with a hint, a real email address).
+    /// Never log or print `authorizeURL` — it carries the PKCE code challenge and, when a hint
+    /// is supplied, a real email address.
     func begin(
         accountID: UUID?,
         forcePaste: Bool,
-        now: () -> Date = Date.init,
-        makeServer: () -> LoopbackServer = { LoopbackServer() }
+        loginHintEmail: String? = nil,
+        now: @Sendable () -> Date = Date.init,
+        makeServer: @Sendable () -> LoopbackServer = { LoopbackServer() }
     ) async throws -> (
         pending: PendingLogin, authorizeURL: URL, server: LoopbackServer?, callback: Task<String?, Never>?
     ) {
@@ -140,7 +152,7 @@ extension OAuthLoginService {
             let pending = PendingLogin(
                 accountID: accountID, mode: .paste, pkce: pkce,
                 redirectURI: OAuthEndpoints.pasteRedirect, startedAt: now())
-            return (pending, pending.authorizeURL(loginHintEmail: nil), nil, nil)
+            return (pending, pending.authorizeURL(loginHintEmail: loginHintEmail), nil, nil)
         }
 
         guard !forcePaste else { return paste() }
@@ -157,7 +169,14 @@ extension OAuthLoginService {
             accountID: accountID, mode: .loopback(port: port), pkce: pkce,
             redirectURI: "http://127.0.0.1:\(port)/callback", startedAt: now())
         let expectedState = pkce.state
-        let callback = Task { await server.waitForCallback(expectedState: expectedState, timeout: Self.loopbackTimeout) }
-        return (pending, pending.authorizeURL(loginHintEmail: nil), server, callback)
+        let callback = Task<String?, Never> {
+            let code = await server.waitForCallback(expectedState: expectedState, timeout: Self.loopbackTimeout)
+            // Task 6 writes the success page before handing the code over, so stopping here
+            // cannot cut the browser off mid-load. Success only: a timeout must leave the
+            // listener up so LoopbackServer's own grace-period "expired" page keeps serving.
+            if code != nil { await server.stop() }
+            return code
+        }
+        return (pending, pending.authorizeURL(loginHintEmail: loginHintEmail), server, callback)
     }
 }
