@@ -78,12 +78,20 @@ extension PendingLogin {
 }
 
 enum OAuthPaste {
+    /// Parses a `code#state` string pasted back from Anthropic's OAuth callback page
+    /// in paste-mode login. Splits on the first `#`, trims surrounding whitespace,
+    /// and rejects input containing internal whitespace or exceeding 8192 characters.
+    ///
+    /// The returned `state` is security-critical: the caller must compare it against
+    /// the pending login's stored state before using the returned `code`.
     static func parse(_ raw: String) -> (code: String, state: String)? {
+        guard raw.count <= 8192 else { return nil }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.count <= 8192, let hash = trimmed.firstIndex(of: "#") else { return nil }
         let code = String(trimmed[..<hash])
         let state = String(trimmed[trimmed.index(after: hash)...])
         guard !code.isEmpty, !state.isEmpty else { return nil }
+        guard !code.contains(where: { $0.isWhitespace }), !state.contains(where: { $0.isWhitespace }) else { return nil }
         return (code, state)
     }
 }

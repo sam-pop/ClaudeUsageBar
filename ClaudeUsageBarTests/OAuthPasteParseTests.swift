@@ -15,4 +15,18 @@ struct OAuthPasteParseTests {
         #expect(OAuthPaste.parse("abc#") == nil)
         #expect(OAuthPaste.parse(String(repeating: "a", count: 9000) + "#s") == nil)
     }
+    @Test("Rejects empty string and whitespace-only input")
+    func rejectsEmpty() {
+        #expect(OAuthPaste.parse("") == nil)
+        #expect(OAuthPaste.parse("   \n  ") == nil)
+    }
+    @Test("Rejects internal whitespace in code or state")
+    func rejectsInternalWhitespace() {
+        #expect(OAuthPaste.parse("abc\n123#state") == nil)
+    }
+    @Test("Handles multiple # by treating everything after first # as state")
+    func handlesMultipleHashes() {
+        #expect(OAuthPaste.parse("abc#xyz#extra")?.state == "xyz#extra")
+        #expect(OAuthPaste.parse("abc#xyz#extra")?.code == "abc")
+    }
 }
