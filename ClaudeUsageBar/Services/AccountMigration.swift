@@ -9,7 +9,7 @@ struct AccountMigration {
     let accountsStore: AccountsStore
     let credentialStore: AccountCredentialStoring
     let defaults: UserDefaults
-    /// Reads the legacy single-account credentials (app item → legacy file → Claude Code).
+    /// Reads the legacy single-account credentials (app item → legacy plaintext file).
     let resolveLegacyCredentials: () -> CachedCredentials?
     /// Deletes the legacy plaintext file and the legacy single `oauth-credentials` item.
     let deleteLegacyArtifacts: () -> Void

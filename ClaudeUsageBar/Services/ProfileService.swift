@@ -2,7 +2,7 @@ import Foundation
 
 /// The identifying facts about a Claude account, from the OAuth profile endpoint.
 /// `uuid` is the stable account identity used for dedupe, default labeling, and the
-/// re-read guard (verifying Claude Code is logged into the account being re-read).
+/// re-auth guard (verifying the browser login signed into the account being re-authed).
 struct AccountIdentity: Equatable {
     let uuid: String
     let email: String?

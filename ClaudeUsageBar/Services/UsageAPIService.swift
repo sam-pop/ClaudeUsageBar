@@ -10,9 +10,9 @@ enum UsageAPIError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .noToken:
-            return "No OAuth token found — open Claude Code, then click Refresh"
+            return "Not signed in — click Log in"
         case .tokenExpired:
-            return "Token expired — click Refresh to re-read from Claude Code"
+            return "Login expired — click Log in again"
         case .requestFailed(let error):
             return "Request failed: \(error.localizedDescription)"
         case .invalidResponse(let code):

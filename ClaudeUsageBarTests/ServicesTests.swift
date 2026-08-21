@@ -1,50 +1,6 @@
 import Testing
 import Foundation
 
-// MARK: - KeychainService.parseCredentials / hexDecode
-
-@Suite("KeychainService credential parsing")
-struct KeychainServiceParseTests {
-
-    @Test("Parses Claude Code OAuth JSON blob including millisecond expiresAt")
-    func parsesJSONBlob() throws {
-        let expiresMs: Double = 1_783_002_600_000 // 2026-07-09T18:30:00Z in ms
-        let json = """
-        {"claudeAiOauth":{"accessToken":"sk-ant-oat01-abc123","refreshToken":"sk-ant-ort01-xyz789","expiresAt":\(Int(expiresMs))}}
-        """
-        let creds = try #require(KeychainService.parseCredentials(from: Data(json.utf8)))
-        #expect(creds.accessToken == "sk-ant-oat01-abc123")
-        #expect(creds.refreshToken == "sk-ant-ort01-xyz789")
-        let expiresAt = try #require(creds.expiresAt)
-        #expect(abs(expiresAt.timeIntervalSince1970 - expiresMs / 1000) < 0.001)
-    }
-
-    @Test("Hex-wrapped JSON blob decodes then parses")
-    func parsesHexWrappedBlob() throws {
-        let json = #"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-hex","refreshToken":"r"}}"#
-        let hex = Data(json.utf8).map { String(format: "%02x", $0) }.joined()
-        let decoded = try #require(KeychainService.hexDecode(hex))
-        let creds = try #require(KeychainService.parseCredentials(from: decoded))
-        #expect(creds.accessToken == "sk-ant-oat01-hex")
-        #expect(creds.refreshToken == "r")
-        #expect(creds.expiresAt == nil)
-    }
-
-    @Test("Regex fallback extracts token from non-JSON text")
-    func regexFallback() throws {
-        let text = "garbage prefix sk-ant-oat01-Token_ABC-123 trailing junk"
-        let creds = try #require(KeychainService.parseCredentials(from: Data(text.utf8)))
-        #expect(creds.accessToken == "sk-ant-oat01-Token_ABC-123")
-        #expect(creds.refreshToken == nil)
-        #expect(creds.expiresAt == nil)
-    }
-
-    @Test("hexDecode rejects odd-length input")
-    func hexDecodeRejectsOddLength() {
-        #expect(KeychainService.hexDecode("abc") == nil)
-    }
-}
-
 // MARK: - CachedCredentials refresh expiry
 
 @Suite("CachedCredentials refresh expiry")

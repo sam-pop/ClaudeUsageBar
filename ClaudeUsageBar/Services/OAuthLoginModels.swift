@@ -53,8 +53,9 @@ extension PendingLogin {
     func authorizeURL(loginHintEmail: String?) -> URL {
         var comps = URLComponents(string: OAuthEndpoints.authorize)!
         var items = [
-            // Included because Claude Code's own login sends it, and our spike's
-            // authorize request carried it too.
+            // Included because our Phase-0 spike sent it in the request that returned
+            // HTTP 200; we did not test the flow without it, so it stays. Not observed in
+            // Claude Code's own binary.
             URLQueryItem(name: "code", value: "true"),
             URLQueryItem(name: "client_id", value: OAuthEndpoints.clientID),
             URLQueryItem(name: "response_type", value: "code"),
@@ -91,7 +92,7 @@ enum OAuthPaste {
     static func parse(_ raw: String) -> (code: String, state: String)? {
         guard raw.count <= 8192 else { return nil }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count <= 8192, let hash = trimmed.firstIndex(of: "#") else { return nil }
+        guard let hash = trimmed.firstIndex(of: "#") else { return nil }
         let code = String(trimmed[..<hash])
         let state = String(trimmed[trimmed.index(after: hash)...])
         guard !code.isEmpty, !state.isEmpty else { return nil }

@@ -1,5 +1,4 @@
 import Foundation
-import Security
 
 struct CachedCredentials: Codable, Equatable {
     var accessToken: String
@@ -7,8 +6,8 @@ struct CachedCredentials: Codable, Equatable {
     var expiresAt: Date?
     /// Expiry of the refresh token itself (Anthropic's refresh tokens carry a rolling
     /// ~28-day expiry). Optional so previously-persisted payloads without this field still
-    /// decode. Default lets existing call sites keep compiling unchanged.
-    var refreshTokenExpiresAt: Date? = nil
+    /// decode.
+    var refreshTokenExpiresAt: Date?
 
     /// Whether the access token has expired or will within `leeway`. Tokens without a
     /// known expiry (`expiresAt == nil`) never report as needing a proactive refresh —
@@ -39,7 +38,8 @@ enum KeychainService {
     }
 
     /// Returns credentials from the app-owned store; otherwise migrates from the legacy
-    /// plaintext file or, failing that, reads Claude Code's keychain item (one-time prompt).
+    /// plaintext file. Returns `nil` if neither has anything — the caller's job is then to
+    /// start a fresh browser login.
     static func getCredentials(legacyFileURL: URL = defaultLegacyCacheURL) -> CachedCredentials? {
         // 1. App-owned store hit.
         if let creds = store.load() {
@@ -56,44 +56,14 @@ enum KeychainService {
             }
             return legacy
         }
-        // 3. Fall through to Claude Code's keychain item (may prompt).
-        guard let creds = readKeychainCredentials() else { return nil }
-        store.save(creds)
-        return creds
-    }
-
-    /// Reads whichever account Claude Code is currently logged into, WITHOUT persisting to
-    /// any app store. The multi-account capture/re-read paths own persistence themselves
-    /// (per-account slot), so they use this rather than `refreshFromKeychain`. May prompt.
-    static func captureFromClaudeCode() -> CachedCredentials? {
-        readKeychainCredentials()
-    }
-
-    /// Force re-read from Claude Code's keychain item. Triggers a password prompt.
-    /// Should only be called from a user-initiated action (e.g., a Refresh button).
-    static func refreshFromKeychain() -> CachedCredentials? {
-        store.delete()
-        guard let creds = readKeychainCredentials() else { return nil }
-        store.save(creds)
-        return creds
+        return nil
     }
 
     // MARK: - OAuth refresh
 
-    /// Exchange a refresh token for a new access token via Anthropic's OAuth endpoint.
-    /// Does not touch Claude Code's keychain item. On success, persists the new credentials
-    /// to the app-owned store. On failure throws — caller should fall back to the
-    /// user-controlled refresh path.
-    static func refreshAccessToken(using refreshToken: String) async throws -> CachedCredentials {
-        let newCreds = try await performOAuthRefresh(refreshToken: refreshToken)
-        store.save(newCreds)
-        return newCreds
-    }
-
     /// The bare OAuth refresh-token exchange: POSTs to the token endpoint and returns the
     /// new credentials WITHOUT persisting them. The multi-account path uses this and lets
-    /// the per-account store own persistence; `refreshAccessToken` wraps it for the legacy
-    /// single-store path.
+    /// the per-account store own persistence.
     static func performOAuthRefresh(refreshToken: String) async throws -> CachedCredentials {
         var request = URLRequest(url: OAuthEndpoints.tokenURL)
         request.httpMethod = "POST"
@@ -168,75 +138,5 @@ enum KeychainService {
            contents.isEmpty {
             try? FileManager.default.removeItem(at: dir)
         }
-    }
-
-    // MARK: - Claude Code keychain item (triggers password prompt)
-
-    private static func readKeychainCredentials() -> CachedCredentials? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "Claude Code-credentials",
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-
-        guard status == errSecSuccess, let data = result as? Data else {
-            return nil
-        }
-
-        if let creds = parseCredentials(from: data) {
-            return creds
-        }
-
-        // Hex-decode fallbacks for stores that wrap the JSON in hex bytes.
-        let hexString = data.map { String(format: "%02x", $0) }.joined()
-        if let hexData = hexDecode(hexString), let creds = parseCredentials(from: hexData) {
-            return creds
-        }
-        if let hexData = hexDecode(String(data: data, encoding: .ascii) ?? ""),
-           let creds = parseCredentials(from: hexData) {
-            return creds
-        }
-
-        return nil
-    }
-
-    static func parseCredentials(from data: Data) -> CachedCredentials? {
-        guard let str = String(data: data, encoding: .utf8) else { return nil }
-
-        // Preferred path: parse the JSON blob Claude Code stores.
-        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let oauth = json["claudeAiOauth"] as? [String: Any],
-           let token = oauth["accessToken"] as? String,
-           !token.isEmpty {
-            let refresh = oauth["refreshToken"] as? String
-            let expiresAtMs = oauth["expiresAt"] as? Double
-            let expiresAt = expiresAtMs.map { Date(timeIntervalSince1970: $0 / 1000.0) }
-            return CachedCredentials(accessToken: token, refreshToken: refresh, expiresAt: expiresAt)
-        }
-
-        // Fallback: regex-extract access token from any text representation.
-        if let range = str.range(of: #"sk-ant-oat01-[A-Za-z0-9_-]+"#, options: .regularExpression) {
-            return CachedCredentials(accessToken: String(str[range]), refreshToken: nil, expiresAt: nil)
-        }
-        return nil
-    }
-
-    static func hexDecode(_ hex: String) -> Data? {
-        let cleaned = hex.filter { $0.isHexDigit }
-        guard cleaned.count % 2 == 0 else { return nil }
-
-        var data = Data(capacity: cleaned.count / 2)
-        var index = cleaned.startIndex
-        while index < cleaned.endIndex {
-            let nextIndex = cleaned.index(index, offsetBy: 2)
-            guard let byte = UInt8(cleaned[index..<nextIndex], radix: 16) else { return nil }
-            data.append(byte)
-            index = nextIndex
-        }
-        return data
     }
 }
